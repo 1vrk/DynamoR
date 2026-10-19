@@ -11,7 +11,8 @@ dependencies = [
     "requests",
     "polars",
     "pyyaml",
-    "tzdata"
+    "tzdata",
+    "scipy",
 ]
 
 [project.optional-dependencies]
