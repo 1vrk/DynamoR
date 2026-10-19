@@ -30,34 +30,32 @@
 @@@@@@@@@@@@@@@@@@@@@@@@@+==-%@%=.++==++==+*%@@%@@%%%%%%%%%@%%#=-*++#@@+*%#%###+@@@@@@@@@@@@@@@@@@@@
 ```
 
-Пре-матч ассистент билдов для Deadlock. По драфту на экране загрузки предлагает билд с учётом союзников и состава противника.
+A pre-match build assistant for Deadlock. From the draft on the loading screen it suggests a build that accounts for allies and the enemy lineup.
 
-MVP строится на табличных итогах матчей с [deadlock-api.com](https://deadlock-api.com), без файлов реплеев. Модель MVP -это косинусное сходство: топ-100 похожих победных драфтов выбранного героя и самые частые предметы в этих матчах.
+The MVP is trained on tabular match results from [deadlock-api.com](https://deadlock-api.com), without replay files. The MVP model is cosine similarity: the top 100 similar winning drafts for the selected hero, and the items that show up most often in those matches.
 
-
-
-## Структура
+## Layout
 
 ```text
-configs/                 параметры MVP и пути к данным
-data/raw/                суточные дампы API
-data/interim/            плоская таблица матчей
-data/processed/          векторы драфтов и таргеты предметов
-data/reference/          id, имена и категории героев и предметов
-artifacts/indexes/       сохранённый индекс рекомендаций
-src/dynamor/data/        скачивание, фильтр high-MMR, схема таблицы
-src/dynamor/features/    one-hot драфта
-src/dynamor/models/      cosine similarity, позже k-NN и бустинг
-src/dynamor/catalog/     имена героев и категории предметов
-src/dynamor/services/    общий вход для интерфейсов
-src/dynamor/app/         Streamlit и CLI
-src/dynamor/api/         FastAPI, после MVP
-scripts/                 скачивание дампов, сборка таблицы и индекса
+configs/                 MVP settings and data paths
+data/raw/                API dumps
+data/interim/            flat match table
+data/processed/          draft vectors and item targets
+data/reference/          hero and item ids, names, and categories
+artifacts/indexes/       saved recommendation index
+src/dynamor/data/        download, high-MMR filter, table schema
+src/dynamor/features/    one-hot draft encoding
+src/dynamor/models/      cosine similarity; k-NN and boosting later
+src/dynamor/catalog/     hero names and item categories
+src/dynamor/services/    shared entry point for the interfaces
+src/dynamor/app/         Streamlit and CLI
+src/dynamor/api/         FastAPI, after the MVP
+scripts/                 download dumps, build the table and the index
 tests/
 ```
 
-`data/raw/`, `data/interim/`, `data/processed/` и `artifacts/` в репозиторий не коммитятся. Справочники из `data/reference/` коммитятся.
+`data/raw/`, `data/interim/`, `data/processed/`, and `artifacts/` are not committed. Reference tables in `data/reference/` are.
 
-## Стек
+## Stack
 
-Python 3.10+, Requests, Polars, scikit-learn, Streamlit. Позже: LightGBM или XGBoost и FastAPI. (думаю, позже изменится немного)
+Python 3.10+, Requests, Polars, scikit-learn, Streamlit. Later: LightGBM or XGBoost and FastAPI. This later stack may change.
