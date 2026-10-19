@@ -23,6 +23,27 @@ def target_matrix(frame: pl.DataFrame, item_catalog: list[int]) -> csr_matrix:
     return matrix
 
 
+def item_time_matrix(frame: pl.DataFrame, item_catalog: list[int]) -> csr_matrix:
+    positions = index_of(item_catalog)
+    row_index: list[int] = []
+    columns: list[int] = []
+    values: list[int] = []
+    item_lists = frame.get_column("winning_items").to_list()
+    time_lists = frame.get_column("winning_item_times").to_list()
+    for index, (items, times) in enumerate(zip(item_lists, time_lists)):
+        for item_id, bought_at in zip(items or [], times or []):
+            if item_id is None:
+                continue
+            row_index.append(index)
+            columns.append(positions[int(item_id)])
+            values.append(int(bought_at))
+    return csr_matrix(
+        (np.array(values, dtype=np.uint32), (row_index, columns)),
+        shape=(frame.height, len(item_catalog)),
+        dtype=np.uint32,
+    )
+
+
 def _unique_ids(item_ids) -> list[int]:
     unique: list[int] = []
     seen: set[int] = set()

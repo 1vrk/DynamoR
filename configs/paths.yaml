@@ -8,4 +8,7 @@ item_catalog_path: data/reference/item_ids.parquet
 rows_path: data/processed/rows.parquet
 drafts_path: data/processed/drafts.npz
 targets_path: data/processed/targets.npz
+item_times_path: data/processed/item_times.npz
 index_path: artifacts/indexes/cosine_mvp.npz
+hero_names_path: data/reference/hero_names.parquet
+item_names_path: data/reference/item_names.parquet

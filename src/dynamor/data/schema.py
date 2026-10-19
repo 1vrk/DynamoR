@@ -11,6 +11,7 @@ SOURCE_COLUMNS = [
     "won",
     "items.item_id",
     "items.sold_time_s",
+    "items.game_time_s",
 ]
 
 OUTPUT_COLUMNS = [
@@ -19,6 +20,7 @@ OUTPUT_COLUMNS = [
     "ally_heroes",
     "enemy_heroes",
     "winning_items",
+    "winning_item_times",
     "average_badge",
     "start_time",
 ]

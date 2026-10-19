@@ -9,19 +9,21 @@ def scan_raw(paths: list[Path]) -> pl.DataFrame:
         raise ValueError("no parquet files")
     return pl.scan_parquet([str(path) for path in paths]).select(SOURCE_COLUMNS)
 
-def final_items(item_ids, sold_time_s) -> list[int]:
-    if item_ids is None or sold_time_s is None:
-        return []
-    if len(item_ids) != len(sold_time_s):
-        return []
-    kept = []
-    seen = set()
-    for item_id, sold_at in zip(item_ids, sold_time_s):
+def final_items(item_ids, sold_time_s, game_time_s) -> tuple[list[int], list[int]]:
+    if item_ids is None or sold_time_s is None or game_time_s is None:
+        return [], []
+    if not (len(item_ids) == len(sold_time_s) == len(game_time_s)):
+        return [], []
+    kept_ids: list[int] = []
+    kept_times: list[int] = []
+    seen: set[int] = set()
+    for item_id, sold_at, bought_at in zip(item_ids, sold_time_s, game_time_s):
         if sold_at != 0 or item_id in seen:
             continue
-        seen.add(item_id)
-        kept.append(int(item_id))
-    return kept
+        seen.add(int(item_id))
+        kept_ids.append(int(item_id))
+        kept_times.append(int(bought_at))
+    return kept_ids, kept_times
 
 def build_rows(frame, settings) -> pl.DataFrame:
     if isinstance(frame, pl.LazyFrame):
@@ -44,7 +46,11 @@ def build_rows(frame, settings) -> pl.DataFrame:
             enemies = heroes[TEAM1 if team_name == TEAM0 else TEAM0]
             winners = side.filter(pl.col("won"))
             for record in winners.iter_rows(named=True):
-                items = final_items(record["items.item_id"], record["items.sold_time_s"])
+                items, times = final_items(
+                    record["items.item_id"],
+                    record["items.sold_time_s"],
+                    record["items.game_time_s"],
+                )
                 if not items:
                     continue
                 hero_id = int(record["hero_id"])
@@ -55,6 +61,7 @@ def build_rows(frame, settings) -> pl.DataFrame:
                         "ally_heroes": sorted(hero for hero in heroes[team_name] if hero != hero_id),
                         "enemy_heroes": sorted(int(hero) for hero in enemies),
                         "winning_items": items,
+                        "winning_item_times": times,
                         "average_badge": int(record["average_badge"]),
                         "start_time": record["start_time"],
                     }
@@ -67,6 +74,7 @@ def build_rows(frame, settings) -> pl.DataFrame:
                 "ally_heroes": pl.List(pl.Int32),
                 "enemy_heroes": pl.List(pl.Int32),
                 "winning_items": pl.List(pl.UInt32),
+                "winning_item_times": pl.List(pl.UInt32),
                 "average_badge": pl.Int32,
                 "start_time": pl.Datetime(time_zone="UTC"),
             }
@@ -80,6 +88,7 @@ def build_rows(frame, settings) -> pl.DataFrame:
             pl.col("ally_heroes").cast(pl.List(pl.Int32)),
             pl.col("enemy_heroes").cast(pl.List(pl.Int32)),
             pl.col("winning_items").cast(pl.List(pl.UInt32)),
+            pl.col("winning_item_times").cast(pl.List(pl.UInt32)),
             pl.col("average_badge").cast(pl.Int32),
         )
     )
