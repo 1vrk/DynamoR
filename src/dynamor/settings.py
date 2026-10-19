@@ -10,6 +10,8 @@ class Settings:
     lookback_hours: int
     min_average_badge: int
     players_per_team: int
+    top_k: int
+    top_items: int
     match_mode: str
     game_mode: str
     manifest_url: str
@@ -20,6 +22,7 @@ class Settings:
     rows_path: Path
     drafts_path: Path
     targets_path: Path
+    index_path: Path
 
 def load_settings() -> Settings:
     mvp = yaml.safe_load((ROOT / "configs" / "mvp.yaml").read_text(encoding="utf-8"))
@@ -28,6 +31,8 @@ def load_settings() -> Settings:
         lookback_hours=mvp["lookback_hours"],
         min_average_badge=mvp["min_average_badge"],
         players_per_team=mvp["players_per_team"],
+        top_k=int(mvp["top_k"]),
+        top_items=int(mvp["top_items"]),
         match_mode=mvp["match_mode"],
         game_mode=mvp["game_mode"],
         manifest_url=paths["manifest_url"],
@@ -38,6 +43,7 @@ def load_settings() -> Settings:
         rows_path=(ROOT / paths["rows_path"]).resolve(),
         drafts_path=(ROOT / paths["drafts_path"]).resolve(),
         targets_path=(ROOT / paths["targets_path"]).resolve(),
+        index_path=(ROOT / paths["index_path"]).resolve(),
     )
 
 #разок прочитает конфиги и обхект вернет
