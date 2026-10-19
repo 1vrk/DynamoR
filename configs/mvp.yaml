@@ -1,0 +1,8 @@
+#smoke then 72/48
+lookback_hours: 48 
+#phantom 1>/
+min_average_badge: 91 
+players_per_team: 6
+match_mode: Ranked
+game_mode: Normal
+match_outcome: TeamWin

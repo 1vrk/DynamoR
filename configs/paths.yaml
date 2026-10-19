@@ -1,0 +1,5 @@
+#список паркетов
+manifest_url: https://data.deadlock-api.com/v1/manifest.json
+#def сырье
+raw_dir: data/raw/match_player 
+interim_path: data/interim/matches.parquet
