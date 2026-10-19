@@ -35,15 +35,39 @@ def test_hero_rows_keeps_the_first_name_and_fills_missing_ids():
 
 def test_item_rows_maps_shop_slots_and_leaves_abilities_as_other():
     payload = [
-        {"id": 10, "name": "Close Quarters", "type": "upgrade", "item_slot_type": "weapon"},
-        {"id": 20, "name": "Extra Health", "type": "upgrade", "item_slot_type": "EItemSlotType_Armor"},
-        {"id": 30, "name": "Extra Spirit", "type": "upgrade", "item_slot_type": "spirit"},
+        {"id": 10, "name": "Close Quarters", "type": "upgrade", "item_slot_type": "weapon", "item_tier": 1, "image_webp": "https://example/cq.webp"},
+        {"id": 20, "name": "Extra Health", "type": "upgrade", "item_slot_type": "EItemSlotType_Armor", "item_tier": 2},
+        {"id": 30, "name": "Extra Spirit", "type": "upgrade", "item_slot_type": "spirit", "item_tier": 3},
         {"id": 40, "name": "Dash", "type": "ability"},
+        {"id": 50, "name": "Relic", "type": "upgrade", "item_slot_type": "weapon", "item_tier": 4},
     ]
-    rows = item_rows(payload, {10, 20, 30, 40})
+    rows = item_rows(payload, {10, 20, 30, 40, 50})
     assert [(row["name"], row["category"]) for row in rows] == [
         ("Close Quarters", "weapon"),
         ("Extra Health", "vitality"),
         ("Extra Spirit", "spirit"),
         ("Dash", "other"),
+        ("Relic", "weapon"),
     ]
+    assert [row["cost"] for row in rows] == [800, 1600, 3200, None, 6400]
+    assert rows[0]["image"] == "https://example/cq.webp"
+    assert rows[3]["image"] is None
+
+
+def test_item_rows_marks_signature_abilities_as_skills():
+    payload = [
+        {
+            "id": 7,
+            "name": "Napalm",
+            "type": "ability",
+            "class_name": "ability_napalm",
+            "heroes": [1],
+            "image_webp": "https://example/n.webp",
+        }
+    ]
+
+    rows = item_rows(payload, {7}, {"ability_napalm"})
+
+    assert rows[0]["category"] == "skill"
+    assert rows[0]["owner"] == 1
+    assert rows[0]["image"] == "https://example/n.webp"

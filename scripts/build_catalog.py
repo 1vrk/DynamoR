@@ -1,7 +1,7 @@
 import polars as pl
 import requests
 
-from dynamor.catalog.assets import hero_rows, item_rows
+from dynamor.catalog.assets import hero_rows, item_rows, signature_class_names
 from dynamor.features.catalog import read_ids
 from dynamor.settings import settings
 
@@ -18,7 +18,13 @@ def fetch_json(url: str) -> list:
 
 def write_table(rows: list[dict], path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame(rows).with_columns(pl.col("id").cast(pl.UInt32)).write_parquet(path)
+    frame = pl.DataFrame(rows)
+    casts = [pl.col("id").cast(pl.UInt32)]
+    if "cost" in frame.columns:
+        casts.append(pl.col("cost").cast(pl.UInt32, strict=False))
+    if "owner" in frame.columns:
+        casts.append(pl.col("owner").cast(pl.UInt32, strict=False))
+    frame.with_columns(casts).write_parquet(path)
 
 
 def main() -> None:
@@ -32,7 +38,7 @@ def main() -> None:
     heroes_payload = fetch_json(HEROES_URL)
     items_payload = fetch_json(ITEMS_URL)
     heroes = hero_rows(heroes_payload, hero_ids)
-    items = item_rows(items_payload, item_ids)
+    items = item_rows(items_payload, item_ids, signature_class_names(heroes_payload))
 
     write_table(heroes, settings.hero_names_path)
     write_table(items, settings.item_names_path)
@@ -50,7 +56,7 @@ def main() -> None:
 
     print(f"heroes={len(heroes)}")
     print(f"items={len(items)}")
-    for category in ("weapon", "vitality", "spirit", "other"):
+    for category in ("weapon", "vitality", "spirit", "skill", "other"):
         print(f"{category}={counts.get(category, 0)}")
     print("slots", ", ".join(slots))
     print(settings.hero_names_path)
