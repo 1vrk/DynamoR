@@ -13,7 +13,7 @@ dependencies = [
     "pyyaml",
     "tzdata",
     "scipy",
-    "scikit-learn",
+    "streamlit"
 ]
 
 [project.optional-dependencies]
