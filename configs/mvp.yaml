@@ -1,5 +1,5 @@
 #smoke then 72/48
-lookback_hours: 48 
+lookback_hours: 120 
 #phantom 1>/
 min_average_badge: 91 
 players_per_team: 6

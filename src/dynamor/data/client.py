@@ -33,7 +33,7 @@ def file_url(manifest: dict, entry: dict) -> str:
     key = str(entry["key"]).lstrip("/")
     return f"{base}/{key}"
 
-def download_files(entries: list[dict], raw_dir: Path, manifest: dict) -> list[Path]:
+def download_files(entries: list[dict], raw_dir: Path, manifest: dict, on_file=None) -> list[Path]:
     raw_dir.mkdir(parents=True, exist_ok=True)
     names = [Path(entry["key"]).name for entry in entries]
     flat_names = len(names) == len(set(names))
@@ -48,6 +48,8 @@ def download_files(entries: list[dict], raw_dir: Path, manifest: dict) -> list[P
         if destination.exists() and destination.stat().st_size == expected:
             print(f"[{index}/{total}] skip {key} ({expected} bytes)")
             saved.append(destination)
+            if on_file is not None:
+                on_file(index, total)
             continue
         temporary = destination.with_name(destination.name + ".part")
         url = file_url(manifest, entry)
@@ -61,4 +63,6 @@ def download_files(entries: list[dict], raw_dir: Path, manifest: dict) -> list[P
                         handle.write(chunk)
         temporary.replace(destination)
         saved.append(destination)
+        if on_file is not None:
+            on_file(index, total)
     return saved
