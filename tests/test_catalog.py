@@ -172,6 +172,88 @@ def test_scale_weights_sum_magnitudes_instead_of_counting_properties():
     assert format_scale_weights(weights) == "weapon:0.86"
 
 
+def test_live_bullet_damage_outranks_a_larger_spirit_scale():
+    heroes = [{"id": 13, "items": {"signature1": "gun", "signature2": "dagger"}}]
+    items = [
+        {
+            "class_name": "gun",
+            "properties": {
+                "Damage": {
+                    "value": "40",
+                    "css_class": "bullet_damage",
+                    "scale_function": {
+                        "class_name": "scale_function_ability_weapon_damage",
+                        "specific_stat_scale_type": "EBaseWeaponDamageIncrease",
+                        "stat_scale": 0.0,
+                    },
+                }
+            },
+        },
+        {"class_name": "dagger", "properties": {"Damage": _spirit_scale(2.2)}},
+    ]
+
+    weights = hero_scale_weights(heroes, items)[13]
+
+    assert format_scale_weights(weights) == "weapon:0.60,spirit:0.40"
+    assert hero_close_categories(heroes, items)[13] == ("weapon", "spirit")
+
+
+def test_spirit_scale_stays_spirit_without_bullet_damage():
+    heroes = [{"id": 14, "items": {"signature1": "dagger"}}]
+    items = [
+        {
+            "class_name": "dagger",
+            "properties": {
+                "Damage": _spirit_scale(2.2),
+                "WeaponPower": {"value": "0"},
+            },
+        }
+    ]
+
+    assert hero_close_categories(heroes, items)[14] == ("spirit",)
+    assert format_scale_weights(hero_scale_weights(heroes, items)[14]) == "spirit:1.00"
+
+
+def test_fire_rate_alone_does_not_outrank_spirit():
+    heroes = [{"id": 15, "items": {"signature1": "gun", "signature2": "dagger"}}]
+    items = [
+        {
+            "class_name": "gun",
+            "properties": {
+                "BonusFireRate": {"value": "20"},
+                "FireRateSlow": {"value": "30", "css_class": "bullet_damage"},
+                "WeaponPowerDebuff": {"value": "-25", "css_class": "bullet_damage"},
+                "RagePerWeaponDamage": {"value": "0.02"},
+            },
+        },
+        {"class_name": "dagger", "properties": {"Damage": _spirit_scale(2.2)}},
+    ]
+
+    assert hero_close_categories(heroes, items)[15] == ("spirit",)
+
+
+def test_a_zero_melee_scale_does_not_outrank_spirit():
+    heroes = [{"id": 16, "items": {"signature1": "punch", "signature2": "dagger"}}]
+    items = [
+        {
+            "class_name": "punch",
+            "properties": {
+                "HeavyMeleeDamage": {
+                    "value": "80",
+                    "scale_function": {
+                        "class_name": "scale_function_single_stat",
+                        "specific_stat_scale_type": "EHeavyMeleeDamage",
+                        "stat_scale": 0.0,
+                    },
+                }
+            },
+        },
+        {"class_name": "dagger", "properties": {"Damage": _spirit_scale(2.2)}},
+    ]
+
+    assert hero_close_categories(heroes, items)[16] == ("spirit",)
+
+
 def test_header_buckets_count_bullet_resilience_and_skip_the_passive():
     item = {
         "tooltip_sections": [

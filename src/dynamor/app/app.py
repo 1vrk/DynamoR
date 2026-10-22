@@ -61,7 +61,7 @@ def _phase_html(items, *, show_time: bool, names=None, crossed=None) -> str:
         if item.upgrade_from is not None and names is not None:
             parent = names.get(item.upgrade_from)
             parent_name = parent[0] if parent is not None else str(item.upgrade_from)
-            upgrade = f"<div>Усиление · {html.escape(parent_name)}</div>"
+            upgrade = f"<div>Upgrade · {html.escape(parent_name)}</div>"
         closed = "<div>4800</div>" if item.item_id in crossed else ""
         cards.append(
             f'<div style="border:2px solid {border};border-radius:8px;padding:8px;'
@@ -75,6 +75,79 @@ def _phase_html(items, *, show_time: bool, names=None, crossed=None) -> str:
             f"</div>"
         )
     return '<div style="display:flex;gap:8px;flex-wrap:wrap">' + "".join(cards) + "</div>"
+
+
+def _counter_html(counters) -> str:
+    cards = []
+    for counter in counters:
+        border = BORDERS.get(counter.category, BORDERS["other"])
+        picture = ""
+        if counter.image:
+            picture = (
+                f'<img src="{html.escape(counter.image)}" alt="" width="64" height="64" '
+                'style="object-fit:contain">'
+            )
+        note = "<div>already in queue</div>" if counter.already else ""
+        if counter.replaces:
+            note = f"<div>instead of {html.escape(counter.replaces)}</div>"
+        cost = "" if counter.cost is None else f"<div>{counter.cost}</div>"
+        cards.append(
+            '<div style="border:2px solid '
+            f'{border};border-radius:8px;padding:8px;width:160px;text-align:center">'
+            f"{picture}"
+            f'<div style="font-weight:600">{html.escape(counter.name)}</div>'
+            f'<div style="font-size:0.85em">{html.escape(counter.reason)}</div>'
+            f"{note}{cost}"
+            "</div>"
+        )
+    return '<div style="display:flex;gap:8px;flex-wrap:wrap">' + "".join(cards) + "</div>"
+
+
+def _chart_html(points) -> str:
+    span = 30 * 60
+    marks = []
+    for point in points:
+        left = min(point.purchase_s, span) / span * 100
+        top = (1 - max(0.0, min(1.0, point.keep_share))) * 100
+        border = BORDERS.get(point.category, BORDERS["other"])
+        thickness = 3 if point.answers else 1
+        picture = ""
+        if point.image:
+            picture = (
+                f'<img src="{html.escape(point.image)}" alt="" width="28" height="28" '
+                'style="object-fit:contain">'
+            )
+        title = (
+            f"{point.name} {point.purchase_s // 60}:{point.purchase_s % 60:02d} "
+            f"{round(point.keep_share * 100)}%"
+        )
+        marks.append(
+            f'<div title="{html.escape(title)}" style="position:absolute;left:{left:.2f}%;'
+            f"top:{top:.2f}%;transform:translate(-50%,-50%);width:36px;height:36px;"
+            f"border:{thickness}px solid {border};border-radius:6px;background:#241f1a;"
+            f'display:flex;align-items:center;justify-content:center;overflow:hidden">'
+            f"{picture}</div>"
+        )
+    plot = (
+        '<div style="position:absolute;left:8px;right:8px;top:32px;bottom:28px">'
+        '<div style="position:absolute;left:33.3%;top:0;bottom:0;border-left:1px dashed #666"></div>'
+        '<div style="position:absolute;left:66.6%;top:0;bottom:0;border-left:1px dashed #666"></div>'
+        '<div style="position:absolute;left:0;right:0;top:50%;border-top:1px dashed #444"></div>'
+        + "".join(marks)
+        + "</div>"
+    )
+    return (
+        '<div style="position:relative;height:340px;background:#1b1a17;border-radius:8px">'
+        '<div style="position:absolute;left:8px;top:8px;font-size:12px;opacity:0.75">Strong Early</div>'
+        '<div style="position:absolute;right:8px;top:8px;font-size:12px;opacity:0.75">Strong Late</div>'
+        '<div style="position:absolute;left:8px;bottom:32px;font-size:12px;opacity:0.75">Weak Early</div>'
+        '<div style="position:absolute;right:8px;bottom:32px;font-size:12px;opacity:0.75">Weak Late</div>'
+        + plot
+        + '<div style="position:absolute;left:33.3%;bottom:4px;transform:translateX(-50%);font-size:12px">10m</div>'
+        '<div style="position:absolute;left:66.6%;bottom:4px;transform:translateX(-50%);font-size:12px">20m</div>'
+        '<div style="position:absolute;right:8px;bottom:4px;font-size:12px">30m</div>'
+        "</div>"
+    )
 
 
 def _stage_line(progress: StageProgress) -> str:
@@ -172,8 +245,9 @@ def _render_build() -> None:
         context.hero_tags,
         context.item_answers,
         context.item_effects,
+        labels,
     )
-    if not build.items and not build.skills:
+    if not build.items and not build.skills and not build.counters and not build.points:
         st.info("No winning drafts for this hero")
         return
 
@@ -204,6 +278,18 @@ def _render_build() -> None:
                 _phase_html(rows, show_time=True, names=context.names, crossed=progress.crossed),
                 unsafe_allow_html=True,
             )
+
+    st.subheader("Counters")
+    if not build.counters:
+        st.caption("No items")
+    else:
+        st.markdown(_counter_html(build.counters), unsafe_allow_html=True)
+
+    st.subheader("Chart")
+    if not build.points:
+        st.caption("No items")
+    else:
+        st.markdown(_chart_html(build.points), unsafe_allow_html=True)
 
 
 st.set_page_config(page_title="DynamoR", layout="wide")

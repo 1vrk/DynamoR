@@ -24,9 +24,34 @@ class ShownItem:
 
 
 @dataclass(frozen=True)
+class CounterPick:
+    item_id: int
+    name: str
+    category: str
+    cost: int | None
+    image: str | None
+    reason: str
+    replaces: str | None = None
+    already: bool = False
+
+
+@dataclass(frozen=True)
+class ChartPoint:
+    item_id: int
+    name: str
+    category: str
+    image: str | None
+    purchase_s: int
+    keep_share: float
+    answers: bool = False
+
+
+@dataclass(frozen=True)
 class DraftBuild:
     items: list[ShownItem]
     skills: list[ShownItem]
+    counters: tuple = ()
+    points: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +95,7 @@ def suggest(
     hero_tags=None,
     item_answers=None,
     item_effects=None,
+    hero_names=None,
 ) -> DraftBuild:
     query = enemy_vector(enemy_ids, hero_catalog)
     if query.nnz == 0:
@@ -117,7 +143,10 @@ def suggest(
         for item in _skill_recommendations(skill_ids, targets, neighbor_rows, item_catalog)
     ]
     skills.sort(key=lambda row: (row.purchase_s is None, row.purchase_s or 0, row.item_id))
-    return DraftBuild(shop, skills)
+    labels = {} if hero_names is None else hero_names
+    counters = _counter_picks(names, answers, effects, use_effects, threats, enemy_ids, hero_tags, shop, labels)
+    points = _chart_points(purchases, neighbor_rows, names, answers, effects, use_effects, threats)
+    return DraftBuild(shop, skills, tuple(counters), tuple(points))
 
 
 def _skill_recommendations(skill_ids, targets, neighbor_rows, item_catalog):
@@ -185,6 +214,8 @@ MAX_BONUS = 0.5
 SPEED_WEIGHT = 0.25
 TAG_ALPHA = 0.2
 THREAT_MIN_ENEMIES = 2
+COUNTER_LIMIT = 4
+CHART_MIN_SHARE = 0.1
 LINE_UNIT = 0.30
 CURVE_SOULS = (800, 1600, 2400, 3200, 4800, 6400, 8000, 11200, 16000, 22400, 28800)
 CURVE_BONUS = {
@@ -276,6 +307,135 @@ def _effect_stat_score(effects: dict[str, float], weights: dict[str, float]) -> 
         elif key in _EFFECT_SLOT:
             score += (value / LINE_UNIT) * weights.get(_EFFECT_SLOT[key], 0.0)
     return score
+
+
+def _answers_threat(threat: str, answers, effects: dict[str, float] | None) -> bool:
+    if effects is None:
+        owned = set(answers or ())
+        return _ANSWER_OF[threat] in owned
+    if threat == "heal":
+        return bool(answers) and "antiheal" in set(answers)
+    for key, answered in _RESIST_THREAT.items():
+        if answered == threat and float(effects.get(key, 0.0) or 0.0) > 0:
+            return True
+    return False
+
+
+def _matched_threats(answers, effects, threats: dict[str, float]) -> list[str]:
+    matched = [threat for threat in threats if _answers_threat(threat, answers, effects)]
+    matched.sort(key=lambda threat: (-threats[threat], threat))
+    return matched
+
+
+def _counter_reason(enemy_ids, tags: dict[int, tuple[str, ...]], matched: list[str], hero_names) -> str:
+    wanted = set(matched)
+    names = []
+    seen: set[int] = set()
+    for enemy in enemy_ids:
+        if enemy is None:
+            continue
+        enemy = int(enemy)
+        if enemy in seen or not wanted.intersection(tags.get(enemy, ())):
+            continue
+        seen.add(enemy)
+        label = hero_names.get(enemy)
+        names.append(str(enemy) if label is None else str(label))
+    reasons = list(matched)
+    return f"against {', '.join(names)} — {', '.join(reasons)}"
+
+
+def _replacement(shop: list[ShownItem], item_id: int, category: str, cost: int | None):
+    if any(item.item_id == item_id for item in shop):
+        return None, True
+    if cost is None:
+        return None, False
+    candidates = [
+        item
+        for item in shop
+        if item.item_id != item_id and item.category == category and item.cost == cost
+    ]
+    if not candidates:
+        return None, False
+    chosen = min(candidates, key=lambda item: (item.confidence_pct, item.score, item.item_id))
+    return chosen.name, False
+
+
+def _counter_picks(names, answers, effects, use_effects, threats, enemy_ids, hero_tags, shop, hero_names):
+    if not threats:
+        return []
+    tags = {} if hero_tags is None else hero_tags
+    owned = effects if use_effects else None
+    ranked = []
+    for item_id, record in names.items():
+        name, category, cost, image = record
+        if category not in INVEST_CATEGORIES:
+            continue
+        item_answers = answers.get(item_id, ())
+        item_effects = None if owned is None else owned.get(item_id, {})
+        matched = _matched_threats(item_answers, item_effects, threats)
+        if not matched:
+            continue
+        strength = sum(threats[threat] for threat in matched)
+        ranked.append((strength, int(item_id), name, category, cost, image, matched))
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    picks = []
+    for _strength, item_id, name, category, cost, image, matched in ranked[:COUNTER_LIMIT]:
+        replaces, already = _replacement(shop, item_id, category, None if cost is None else int(cost))
+        picks.append(
+            CounterPick(
+                item_id=item_id,
+                name=name,
+                category=category,
+                cost=None if cost is None else int(cost),
+                image=None if image is None else str(image),
+                reason=_counter_reason(enemy_ids, tags, matched, hero_names),
+                replaces=replaces,
+                already=already,
+            )
+        )
+    return picks
+
+
+def _chart_points(purchases, neighbor_rows, names, answers, effects, use_effects, threats) -> list[ChartPoint]:
+    neighbor_count = len(neighbor_rows)
+    if neighbor_count == 0:
+        return []
+    buyers: dict[int, list[int]] = {}
+    keepers: dict[int, int] = {}
+    for row in neighbor_rows:
+        if row >= len(purchases):
+            continue
+        seen: set[int] = set()
+        for item_id, bought_at, sold_at in purchases[row]:
+            item_id = int(item_id)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            buyers.setdefault(item_id, []).append(int(bought_at))
+            if int(sold_at) == 0:
+                keepers[item_id] = keepers.get(item_id, 0) + 1
+    owned = effects if use_effects else None
+    points = []
+    for item_id, times in buyers.items():
+        if len(times) / neighbor_count < CHART_MIN_SHARE:
+            continue
+        name, category, _cost, image = names.get(item_id, (str(item_id), "other", None, None))
+        if category not in INVEST_CATEGORIES:
+            continue
+        item_effects = None if owned is None else owned.get(item_id, {})
+        points.append(
+            ChartPoint(
+                item_id=item_id,
+                name=name,
+                category=category,
+                image=None if image is None else str(image),
+                purchase_s=int(np.median(times)),
+                keep_share=keepers.get(item_id, 0) / neighbor_count,
+                answers=bool(_matched_threats(answers.get(item_id, ()), item_effects, threats)),
+            )
+        )
+    points.sort(key=lambda point: (point.purchase_s, point.item_id))
+    return points
 
 
 def _threat_bonus(answers, threats: dict[str, float], effects: dict[str, float] | None = None) -> float:

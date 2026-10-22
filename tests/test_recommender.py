@@ -634,3 +634,166 @@ def test_an_item_neighbors_did_not_keep_stays_out_of_the_fifteen():
     )
 
     assert [item.item_id for item in build.items] == [10]
+
+
+def _counter_build(enemies, hero_tags):
+    index = csr_matrix([[1, 1, 0], [1, 1, 0], [1, 1, 0], [1, 1, 0]], dtype=np.float64)
+    targets = csr_matrix(
+        [[1, 1, 1], [0, 1, 0], [0, 1, 0], [0, 1, 0]],
+        dtype=np.uint8,
+    )
+    item_times = csr_matrix(
+        ([40, 40, 40, 40, 40], ([0, 0, 0, 1, 2], [0, 1, 2, 1, 1])),
+        shape=(4, 3),
+        dtype=np.uint32,
+    )
+    names = {
+        10: ("Extra Spirit", "spirit", 1600, None),
+        20: ("Close Quarters", "weapon", 1600, None),
+        30: ("Extra Health", "vitality", 1600, None),
+        40: ("Healbane", "spirit", 1600, None),
+    }
+    return suggest(
+        5,
+        enemies,
+        index,
+        targets,
+        np.array([5, 5, 5, 5]),
+        [1, 2, 60],
+        [10, 20, 30],
+        names,
+        item_times,
+        top_k=4,
+        top_items=15,
+        hero_tags=hero_tags,
+        item_answers={40: ("antiheal",)},
+        hero_names={1: "Dynamo", 2: "Ivy"},
+    )
+
+
+def test_two_healers_raise_an_antiheal_missing_from_the_fifteen():
+    build = _counter_build([1, 2], {1: ("heal",), 2: ("heal",)})
+
+    assert [item.item_id for item in build.items] == [10, 20, 30]
+    assert build.counters[0].item_id == 40
+    assert build.counters[0].reason == "against Dynamo, Ivy — heal"
+    assert build.counters[0].replaces == "Extra Spirit"
+    assert build.counters[0].already is False
+
+
+def test_one_healer_does_not_raise_a_counter():
+    build = _counter_build([1], {1: ("heal",), 2: ("heal",)})
+
+    assert build.counters == ()
+
+
+def test_a_counter_already_in_the_queue_is_not_replaced():
+    index = csr_matrix([[1, 1, 0], [1, 1, 0]], dtype=np.float64)
+    targets = csr_matrix([[1], [1]], dtype=np.uint8)
+    item_times = csr_matrix(([10, 10], ([0, 1], [0, 0])), shape=(2, 1), dtype=np.uint32)
+    names = {40: ("Healbane", "spirit", 1600, None)}
+
+    build = suggest(
+        5,
+        [1, 2],
+        index,
+        targets,
+        np.array([5, 5]),
+        [1, 2, 60],
+        [40],
+        names,
+        item_times,
+        top_k=2,
+        top_items=15,
+        hero_tags={1: ("heal",), 2: ("heal",)},
+        item_answers={40: ("antiheal",)},
+        hero_names={1: "Dynamo", 2: "Ivy"},
+    )
+
+    assert build.counters[0].item_id == 40
+    assert build.counters[0].already is True
+    assert build.counters[0].replaces is None
+
+
+def test_bullet_resist_counters_weapon_and_lumped_defense_does_not():
+    index = csr_matrix([[1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix([[1], [1]], dtype=np.uint8)
+    item_times = csr_matrix(([10, 10], ([0, 1], [0, 0])), shape=(2, 1), dtype=np.uint32)
+    names = {
+        10: ("Extra Spirit", "spirit", 1600, None),
+        40: ("Bullet Resilience", "vitality", 1600, None),
+        50: ("Metal Skin", "vitality", 1600, None),
+    }
+
+    build = suggest(
+        5,
+        [1, 1],
+        index,
+        targets,
+        np.array([5, 5]),
+        [1, 7, 60],
+        [10],
+        names,
+        item_times,
+        top_k=2,
+        top_items=15,
+        hero_tags={1: ("weapon",)},
+        item_answers={50: ("defense",)},
+        item_effects={40: {"bullet_resist": 0.45}, 50: {}},
+        hero_names={1: "Haze"},
+    )
+
+    assert [counter.item_id for counter in build.counters] == [40]
+    assert build.counters[0].reason == "against Haze — weapon"
+    assert 40 not in {item.item_id for item in build.items}
+
+
+def test_chart_time_and_keep_share_ignore_threats():
+    count = 20
+    index = csr_matrix(
+        ([1] * count, (list(range(count)), [0] * count)),
+        shape=(count, 3),
+        dtype=np.float64,
+    )
+    targets = csr_matrix((count, 1), dtype=np.uint8)
+    item_times = csr_matrix((count, 1), dtype=np.uint32)
+    names = {
+        10: ("Close Quarters", "weapon", 800, None),
+        99: ("Rare", "spirit", 800, None),
+    }
+    purchases = []
+    for row in range(count):
+        sold = 0 if row < 10 else 50
+        bought = [(10, 120, sold)]
+        if row == 0:
+            bought.append((99, 30, 0))
+        purchases.append(bought)
+    shared = dict(
+        hero_id=5,
+        index=index,
+        targets=targets,
+        hero_ids=np.array([5] * count),
+        hero_catalog=[1, 7, 60],
+        item_catalog=[10],
+        names=names,
+        item_times=item_times,
+        top_k=count,
+        top_items=15,
+        purchases=purchases,
+    )
+    plain = suggest(enemy_ids=[1], **shared)
+    marked = suggest(
+        enemy_ids=[1, 1],
+        hero_tags={1: ("heal",)},
+        item_answers={10: ("antiheal",)},
+        **shared,
+    )
+
+    point = plain.points[0]
+    assert point.item_id == 10
+    assert point.purchase_s == 120
+    assert point.keep_share == 0.5
+    assert 99 not in {row.item_id for row in plain.points}
+    assert marked.points[0].keep_share == point.keep_share
+    assert marked.points[0].purchase_s == point.purchase_s
+    assert marked.points[0].answers is True

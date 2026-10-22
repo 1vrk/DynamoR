@@ -74,6 +74,60 @@ def scale_magnitudes(scale) -> dict[str, float]:
     return {category: value for category in categories_of_scale(scale)}
 
 
+_BULLET_NAME_TOKENS = ("weapondamage", "bulletdamage", "attackdamage", "weaponpower")
+_MELEE_STATS = {"ELightMeleeDamage", "EHeavyMeleeDamage"}
+
+
+def _scale_stat_names(scale) -> list[str]:
+    if not isinstance(scale, dict):
+        return []
+    stats = []
+    if scale.get("specific_stat_scale_type"):
+        stats.append(str(scale["specific_stat_scale_type"]))
+    stats.extend(str(item) for item in (scale.get("scaling_stats") or []))
+    return stats
+
+
+def _is_melee(name: str, scale) -> bool:
+    if "melee" in _compact_name(name):
+        return True
+    if not isinstance(scale, dict):
+        return False
+    if "melee" in str(scale.get("class_name") or "").lower():
+        return True
+    return any(stat in _MELEE_STATS for stat in _scale_stat_names(scale))
+
+
+def _is_live_bullet_damage(name: str, prop) -> bool:
+    if not isinstance(prop, dict) or not _property_is_live(prop):
+        return False
+    scale = prop.get("scale_function")
+    if _is_melee(name, scale):
+        return False
+    key = _compact_name(name)
+    if "firerate" in key or any(token in key for token in ("debuff", "reduction", "slow", "penalty", "shred")):
+        return False
+    if "bullet_damage" in str(prop.get("css_class") or "").lower():
+        return True
+    if "per" in key.replace("percent", ""):
+        return False
+    if any(token in key for token in _BULLET_NAME_TOKENS):
+        return True
+    if not isinstance(scale, dict):
+        return False
+    try:
+        magnitude = float(scale.get("stat_scale"))
+    except (TypeError, ValueError):
+        return False
+    return magnitude >= _SCALE_MIN and "weapon" in categories_of_scale(scale)
+
+
+def _raise_weapon_bar(totals: dict[str, float]) -> None:
+    others = sum(amount for category, amount in totals.items() if category != "weapon")
+    floor = 1.0 if others <= 0 else others * 1.5
+    totals["weapon"] = max(totals.get("weapon", 0.0), floor)
+
+
 def hero_scale_weights(heroes, items) -> dict[int, dict[str, float]]:
     by_class = {}
     for item in items:
@@ -83,6 +137,7 @@ def hero_scale_weights(heroes, items) -> dict[int, dict[str, float]]:
     result: dict[int, dict[str, float]] = {}
     for hero in heroes:
         totals: dict[str, float] = {}
+        bullet = False
         slots = hero.get("items") or {}
         if not isinstance(slots, dict):
             continue
@@ -93,11 +148,14 @@ def hero_scale_weights(heroes, items) -> dict[int, dict[str, float]]:
             props = ability.get("properties") or {}
             if not isinstance(props, dict):
                 continue
-            for prop in props.values():
+            for name, prop in props.items():
                 if not isinstance(prop, dict):
                     continue
                 for category, value in scale_magnitudes(prop.get("scale_function")).items():
                     totals[category] = totals.get(category, 0.0) + value
+                bullet = bullet or _is_live_bullet_damage(str(name), prop)
+        if bullet:
+            _raise_weapon_bar(totals)
         total = sum(totals.values())
         if total <= 0:
             result[int(hero["id"])] = {}
