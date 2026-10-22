@@ -25,6 +25,72 @@ def cost_of(item) -> int | None:
         return None
 
 
+_SCALE_MIN = 0.2
+_WEAPON_STATS = {
+    "EBaseWeaponDamageIncrease",
+    "EWeaponPower",
+    "EBulletDamage",
+    "EWeaponDamageScale",
+    "ELightMeleeDamage",
+    "EHeavyMeleeDamage",
+}
+
+
+def categories_of_scale(scale) -> set[str]:
+    if not isinstance(scale, dict):
+        return set()
+    raw = scale.get("stat_scale")
+    if raw is not None:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value == 0 or (value is not None and value < _SCALE_MIN):
+            return set()
+    stats = []
+    if scale.get("specific_stat_scale_type"):
+        stats.append(str(scale["specific_stat_scale_type"]))
+    stats.extend(str(item) for item in (scale.get("scaling_stats") or []))
+    class_name = str(scale.get("class_name") or "")
+    found: set[str] = set()
+    if class_name in {"scale_function_tech_damage", "scale_function_healing_spirit_scale"} or "ETechPower" in stats:
+        found.add("spirit")
+    if "weapon" in class_name or any(stat in _WEAPON_STATS for stat in stats):
+        found.add("weapon")
+    if "EHealingOutput" in stats or any("Health" in stat and stat != "ELevelUpBoons" for stat in stats):
+        found.add("vitality")
+    return found
+
+
+def hero_close_categories(heroes, items) -> dict[int, tuple[str, ...]]:
+    by_class = {}
+    for item in items:
+        class_name = item.get("class_name")
+        if class_name and class_name not in by_class:
+            by_class[str(class_name)] = item
+    result: dict[int, tuple[str, ...]] = {}
+    for hero in heroes:
+        counts: dict[str, int] = {}
+        slots = hero.get("items") or {}
+        if not isinstance(slots, dict):
+            continue
+        for key in ("signature1", "signature2", "signature3", "signature4"):
+            ability = by_class.get(str(slots.get(key) or ""))
+            if not ability:
+                continue
+            props = ability.get("properties") or {}
+            if not isinstance(props, dict):
+                continue
+            for prop in props.values():
+                if not isinstance(prop, dict):
+                    continue
+                for category in categories_of_scale(prop.get("scale_function")):
+                    counts[category] = counts.get(category, 0) + 1
+        ranked = sorted(counts, key=lambda name: (-counts[name], name))
+        result[int(hero["id"])] = tuple(ranked[:2])
+    return result
+
+
 def signature_class_names(heroes) -> set[str]:
     names: set[str] = set()
     for hero in heroes:

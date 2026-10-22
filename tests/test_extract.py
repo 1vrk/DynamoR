@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import polars as pl
 
-from dynamor.data.extract import build_rows
+from dynamor.data.extract import build_rows, purchase_log, upgrade_pairs
 from dynamor.data.schema import TEAM0, TEAM1
 
 WHEN = datetime(2026, 10, 19, 17, 0, tzinfo=timezone.utc)
@@ -21,6 +21,40 @@ def player(match_id, hero_id, team, won, items, sold, bought=None):
         "items.sold_time_s": sold,
         "items.game_time_s": [0] * len(items) if bought is None else bought,
     }
+
+
+def test_purchase_log_keeps_a_sold_item():
+    items, times, sold = purchase_log([10, 30], [20, 0], [5, 20])
+
+    assert items == [10, 30]
+    assert times == [5, 20]
+    assert sold == [20, 0]
+
+
+def test_upgrade_pairs_link_one_item_bought_at_the_sale():
+    children, parents = upgrade_pairs([10, 30], [20, 0], [5, 20], [1, 0])
+
+    assert children == [30]
+    assert parents == [10]
+
+
+def test_upgrade_pairs_skip_two_purchases_at_the_same_second():
+    children, parents = upgrade_pairs(
+        [10, 20, 30, 40],
+        [15, 15, 0, 0],
+        [5, 6, 15, 15],
+        [1, 1, 0, 0],
+    )
+
+    assert children == []
+    assert parents == []
+
+
+def test_upgrade_pairs_keep_the_last_step_of_a_chain():
+    children, parents = upgrade_pairs([1, 2, 3], [10, 20, 0], [1, 10, 20], [1, 1, 0])
+
+    assert children == [3]
+    assert parents == [2]
 
 
 def test_build_rows_keeps_full_winning_team_only():

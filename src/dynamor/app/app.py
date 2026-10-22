@@ -3,7 +3,15 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
-from dynamor.services.recommender import group_phases, load_context, suggest, validate_draft
+from dynamor.services.recommender import (
+    INVEST_CATEGORIES,
+    INVEST_TARGET,
+    group_phases,
+    investment_progress,
+    load_context,
+    suggest,
+    validate_draft,
+)
 from dynamor.services.refresh import (
     STAGES,
     RefreshError,
@@ -26,9 +34,15 @@ BORDERS = {
     "skill": "#E6E6E6",
     "other": "#8A8A8A",
 }
+INVEST_LABELS = {
+    "weapon": "Weapon",
+    "vitality": "Vitality",
+    "spirit": "Spirit",
+}
 
 
-def _phase_html(items, *, show_time: bool) -> str:
+def _phase_html(items, *, show_time: bool, names=None, crossed=None) -> str:
+    crossed = crossed or {}
     cards = []
     for item in items:
         border = BORDERS.get(item.category, BORDERS["other"])
@@ -43,11 +57,19 @@ def _phase_html(items, *, show_time: bool) -> str:
             clock = f"<div>{item.purchase_s // 60}:{item.purchase_s % 60:02d}</div>"
         meta = [str(item.cost)] if item.cost is not None else []
         meta.append(f"{item.confidence_pct}%")
+        upgrade = ""
+        if item.upgrade_from is not None and names is not None:
+            parent = names.get(item.upgrade_from)
+            parent_name = parent[0] if parent is not None else str(item.upgrade_from)
+            upgrade = f"<div>Усиление · {html.escape(parent_name)}</div>"
+        closed = "<div>4800</div>" if item.item_id in crossed else ""
         cards.append(
             f'<div style="border:2px solid {border};border-radius:8px;padding:8px;'
             f'width:120px;text-align:center">'
             f"{picture}"
             f'<div style="font-weight:600">{html.escape(item.name)}</div>'
+            f"{upgrade}"
+            f"{closed}"
             f"{clock}"
             f'<div style="opacity:0.75;font-size:0.85em">{html.escape(" · ".join(meta))}</div>'
             f"</div>"
@@ -143,6 +165,8 @@ def _render_build() -> None:
         settings.top_k,
         settings.top_items,
         context.skills.get(own_id, []),
+        context.upgrades,
+        context.purchases,
     )
     if not build.items and not build.skills:
         st.info("No winning drafts for this hero")
@@ -154,6 +178,16 @@ def _render_build() -> None:
     else:
         st.markdown(_phase_html(build.skills, show_time=False), unsafe_allow_html=True)
 
+    close = context.scales.get(own_id, ())
+    progress = investment_progress(build.items, close)
+    for category in INVEST_CATEGORIES:
+        label = INVEST_LABELS[category]
+        total = progress.totals[category]
+        if category in close:
+            st.write(f"{label} {total} / {INVEST_TARGET}")
+        else:
+            st.write(f"{label} {total}")
+
     phases = group_phases(build.items)
     for key, heading in PHASES:
         st.subheader(heading)
@@ -161,7 +195,10 @@ def _render_build() -> None:
         if not rows:
             st.caption("No items")
         else:
-            st.markdown(_phase_html(rows, show_time=True), unsafe_allow_html=True)
+            st.markdown(
+                _phase_html(rows, show_time=True, names=context.names, crossed=progress.crossed),
+                unsafe_allow_html=True,
+            )
 
 
 st.set_page_config(page_title="DynamoR", layout="wide")

@@ -7,7 +7,7 @@ import polars as pl
 import requests
 from scipy import sparse
 
-from dynamor.catalog.assets import hero_rows, item_rows, signature_class_names
+from dynamor.catalog.assets import hero_close_categories, hero_rows, item_rows, signature_class_names
 from dynamor.data.client import download_files, fetch_manifest, select_files
 from dynamor.data.extract import build_rows, scan_raw, write_interim
 from dynamor.data.filter import filter_matches
@@ -114,9 +114,12 @@ def build_feature_matrices(settings) -> dict:
     targets = target_matrix(frame, items)
     item_times = item_time_matrix(frame, items)
     settings.rows_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.select("match_id", "hero_id_target", "average_badge", "start_time").write_parquet(
-        settings.rows_path
-    )
+    columns = ["match_id", "hero_id_target", "average_badge", "start_time"]
+    if "upgrade_child" in frame.columns and "upgrade_parent" in frame.columns:
+        columns.extend(["upgrade_child", "upgrade_parent"])
+    if {"purchase_items", "purchase_times", "purchase_sold"} <= set(frame.columns):
+        columns.extend(["purchase_items", "purchase_times", "purchase_sold"])
+    frame.select(columns).write_parquet(settings.rows_path)
     sparse.save_npz(settings.drafts_path, drafts)
     sparse.save_npz(settings.targets_path, targets)
     sparse.save_npz(settings.item_times_path, item_times)
@@ -149,6 +152,9 @@ def build_name_catalog(settings) -> dict:
     heroes_payload = _fetch_json(HEROES_URL)
     items_payload = _fetch_json(ITEMS_URL)
     heroes = hero_rows(heroes_payload, hero_catalog)
+    close = hero_close_categories(heroes_payload, items_payload)
+    for row in heroes:
+        row["scales"] = ",".join(close.get(row["id"], ()))
     items = item_rows(items_payload, item_catalog, signature_class_names(heroes_payload))
     _write_table(heroes, settings.hero_names_path)
     _write_table(items, settings.item_names_path)

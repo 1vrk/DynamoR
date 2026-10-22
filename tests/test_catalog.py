@@ -1,7 +1,7 @@
 import polars as pl
 
 from dynamor.features.catalog import hero_ids, index_of, item_ids, read_ids, write_ids
-from dynamor.catalog.assets import hero_rows, item_rows
+from dynamor.catalog.assets import hero_close_categories, hero_rows, item_rows
 
 
 def test_catalog_sorts_heroes_and_keeps_large_item_ids(tmp_path):
@@ -23,6 +23,17 @@ def test_catalog_sorts_heroes_and_keeps_large_item_ids(tmp_path):
     assert items == [10, 3190916303]
     assert read_ids(path) == [10, 3190916303]
     assert index_of(items)[3190916303] == 1
+
+
+def test_item_ids_include_purchases_that_were_sold():
+    frame = pl.DataFrame(
+        {
+            "winning_items": [[10]],
+            "purchase_items": [[10, 99]],
+        }
+    )
+
+    assert item_ids(frame) == [10, 99]
 
 def test_hero_rows_keeps_the_first_name_and_fills_missing_ids():
     payload = [
@@ -71,3 +82,29 @@ def test_item_rows_marks_signature_abilities_as_skills():
     assert rows[0]["category"] == "skill"
     assert rows[0]["owner"] == 1
     assert rows[0]["image"] == "https://example/n.webp"
+
+
+def test_hero_close_categories_skip_a_weak_spirit_scale():
+    heroes = [{"id": 84, "items": {"signature1": "ability_gun", "signature2": "ability_slow"}}]
+    items = [
+        {
+            "class_name": "ability_gun",
+            "properties": {
+                "Damage": {
+                    "scale_function": {
+                        "class_name": "scale_function_ability_weapon_damage",
+                        "specific_stat_scale_type": "EBaseWeaponDamageIncrease",
+                        "stat_scale": 1.2,
+                    }
+                }
+            },
+        },
+        {
+            "class_name": "ability_slow",
+            "properties": {
+                "Slow": {"scale_function": {"class_name": "scale_function_tech_damage", "stat_scale": 0.08}}
+            },
+        },
+    ]
+
+    assert hero_close_categories(heroes, items)[84] == ("weapon",)

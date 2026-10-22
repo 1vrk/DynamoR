@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import polars as pl
@@ -20,6 +20,7 @@ class ShownItem:
     cost: int | None
     purchase_s: int | None
     image: str | None
+    upgrade_from: int | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class Context:
     item_times: sparse.csr_matrix
     names: dict[int, tuple[str, str, int | None, str | None]]
     skills: dict[int, list[int]]
+    upgrades: list[list[tuple[int, int]]]
+    scales: dict[int, tuple[str, ...]]
+    purchases: list[list[tuple[int, int, int]]]
 
 
 def suggest(
@@ -54,6 +58,8 @@ def suggest(
     top_k: int,
     top_items: int,
     skill_ids=(),
+    upgrades=(),
+    purchases=(),
 ) -> DraftBuild:
     query = enemy_vector(enemy_ids, hero_catalog)
     if query.nnz == 0:
@@ -72,7 +78,9 @@ def suggest(
         shop.append(shown)
         if len(shop) == top_items:
             break
+    shop.extend(_lane_items(purchases, neighbor_rows, {item.item_id for item in shop}, names))
     shop.sort(key=lambda row: (row.purchase_s is None, row.purchase_s or 0, row.item_id))
+    shop = _attach_upgrades(shop, _modal_parents(upgrades, neighbor_rows))
     skills = [
         _shown_item(item, names, item_times, neighbor_rows, positions)
         for item in _skill_recommendations(skill_ids, targets, neighbor_rows, item_catalog)
@@ -100,6 +108,123 @@ def _skill_recommendations(skill_ids, targets, neighbor_rows, item_catalog):
             )
         )
     return rows
+
+
+def _modal_parents(upgrades, neighbor_rows) -> dict[int, int]:
+    votes: dict[int, dict[int, int]] = {}
+    for row in neighbor_rows:
+        if row >= len(upgrades):
+            continue
+        for child, parent in upgrades[row]:
+            counts = votes.setdefault(int(child), {})
+            counts[int(parent)] = counts.get(int(parent), 0) + 1
+    return {
+        child: min(counts, key=lambda parent: (-counts[parent], parent))
+        for child, counts in votes.items()
+    }
+
+
+def _attach_upgrades(items: list[ShownItem], parents: dict[int, int]) -> list[ShownItem]:
+    order = {item.item_id: index for index, item in enumerate(items)}
+    by_id = {item.item_id: item for item in items}
+    linked = []
+    for item in items:
+        parent = by_id.get(parents.get(item.item_id))
+        upgrade_from = None
+        if (
+            parent is not None
+            and order[parent.item_id] < order[item.item_id]
+            and parent.category == item.category
+            and parent.cost is not None
+            and item.cost is not None
+            and parent.cost < item.cost
+        ):
+            upgrade_from = parent.item_id
+        linked.append(replace(item, upgrade_from=upgrade_from))
+    return linked
+
+
+INVEST_CATEGORIES = ("weapon", "vitality", "spirit")
+INVEST_TARGET = 4800
+LANE_SHARE = 0.4
+LANE_LIMIT = 8
+
+
+def _lane_items(purchases, neighbor_rows, already: set[int], names) -> list[ShownItem]:
+    buyers: dict[int, list[int]] = {}
+    for row in neighbor_rows:
+        if row >= len(purchases):
+            continue
+        seen: set[int] = set()
+        for item_id, bought_at, _sold_at in purchases[row]:
+            item_id = int(item_id)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            buyers.setdefault(item_id, []).append(int(bought_at))
+    neighbor_count = len(neighbor_rows)
+    if neighbor_count == 0:
+        return []
+    chosen = []
+    for item_id, times in buyers.items():
+        if item_id in already:
+            continue
+        share = len(times) / neighbor_count
+        if share < LANE_SHARE:
+            continue
+        name, category, cost, image = names.get(item_id, (str(item_id), "other", None, None))
+        if category not in INVEST_CATEGORIES:
+            continue
+        chosen.append((share, item_id, times, name, category, cost, image))
+    chosen.sort(key=lambda row: (-row[0], row[1]))
+    items = []
+    for share, item_id, times, name, category, cost, image in chosen[:LANE_LIMIT]:
+        items.append(
+            ShownItem(
+                item_id=item_id,
+                name=name,
+                category=category,
+                confidence_pct=int(round(share * 100)),
+                tf=len(times),
+                score=0.0,
+                cost=None if cost is None else int(cost),
+                purchase_s=int(np.median(times)),
+                image=None if image is None else str(image),
+            )
+        )
+    return items
+
+
+@dataclass(frozen=True)
+class Investment:
+    totals: dict[str, int]
+    crossed: dict[int, str]
+
+
+def investment_progress(items: list[ShownItem], close_categories) -> Investment:
+    totals = {category: 0 for category in INVEST_CATEGORIES}
+    crossed: dict[int, str] = {}
+    close = set(close_categories)
+    replaced: set[int] = set()
+    by_id = {item.item_id: item for item in items}
+    for item in items:
+        if item.category not in totals or item.cost is None:
+            continue
+        added = item.cost
+        parent = by_id.get(item.upgrade_from) if item.upgrade_from is not None else None
+        if (
+            parent is not None
+            and parent.item_id not in replaced
+            and parent.cost is not None
+            and parent.cost < item.cost
+        ):
+            added = item.cost - parent.cost
+            replaced.add(parent.item_id)
+        before = totals[item.category]
+        totals[item.category] = before + added
+        if item.category in close and before < INVEST_TARGET <= totals[item.category]:
+            crossed[item.item_id] = item.category
+    return Investment(totals, crossed)
 
 
 def _shown_item(item, names, item_times, neighbor_rows, positions) -> ShownItem:
@@ -158,6 +283,46 @@ def group_items(items: list[ShownItem]) -> dict[str, list[ShownItem]]:
     return grouped
 
 
+def _upgrade_pairs(frame: pl.DataFrame) -> list[list[tuple[int, int]]]:
+    if "upgrade_child" not in frame.columns or "upgrade_parent" not in frame.columns:
+        return [[] for _ in range(frame.height)]
+    pairs = []
+    children = frame.get_column("upgrade_child").to_list()
+    parents = frame.get_column("upgrade_parent").to_list()
+    for child_ids, parent_ids in zip(children, parents):
+        pairs.append([
+            (int(child), int(parent))
+            for child, parent in zip(child_ids or [], parent_ids or [])
+        ])
+    return pairs
+
+
+def _purchases(frame: pl.DataFrame) -> list[list[tuple[int, int, int]]]:
+    needed = {"purchase_items", "purchase_times", "purchase_sold"}
+    if not needed <= set(frame.columns):
+        return [[] for _ in range(frame.height)]
+    logs = []
+    items = frame.get_column("purchase_items").to_list()
+    times = frame.get_column("purchase_times").to_list()
+    sold = frame.get_column("purchase_sold").to_list()
+    for item_ids, bought_at, sold_at in zip(items, times, sold):
+        logs.append([
+            (int(item_id), int(bought), int(sold_time))
+            for item_id, bought, sold_time in zip(item_ids or [], bought_at or [], sold_at or [])
+        ])
+    return logs
+
+
+def _scales_by_hero(frame: pl.DataFrame) -> dict[int, tuple[str, ...]]:
+    if "scales" not in frame.columns:
+        return {}
+    scales = {}
+    for row in frame.iter_rows(named=True):
+        text = "" if row["scales"] is None else str(row["scales"])
+        scales[int(row["id"])] = tuple(part for part in text.split(",") if part)
+    return scales
+
+
 def _skills_by_hero(frame: pl.DataFrame) -> dict[int, list[int]]:
     if "owner" not in frame.columns:
         return {}
@@ -190,10 +355,11 @@ def load_context(settings) -> Context:
         raise FileNotFoundError(settings.item_times_path)
     item_frame = pl.read_parquet(settings.item_names_path)
     hero_frame = pl.read_parquet(settings.hero_names_path)
+    rows = pl.read_parquet(settings.rows_path)
     return Context(
         index=sparse.load_npz(settings.index_path),
         targets=sparse.load_npz(settings.targets_path),
-        hero_ids=pl.read_parquet(settings.rows_path).get_column("hero_id_target").to_numpy(),
+        hero_ids=rows.get_column("hero_id_target").to_numpy(),
         hero_catalog=read_ids(settings.hero_catalog_path),
         item_catalog=read_ids(settings.item_catalog_path),
         heroes=[
@@ -202,6 +368,9 @@ def load_context(settings) -> Context:
         ],
         item_times=sparse.load_npz(settings.item_times_path),
         skills=_skills_by_hero(item_frame),
+        upgrades=_upgrade_pairs(rows),
+        scales=_scales_by_hero(hero_frame),
+        purchases=_purchases(rows),
         names={
             int(row["id"]): (
                 row["name"],
