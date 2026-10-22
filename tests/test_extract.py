@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import polars as pl
 
-from dynamor.data.extract import build_rows
+from dynamor.data.extract import build_rows, chart_rows, purchase_log, upgrade_pairs
 from dynamor.data.schema import TEAM0, TEAM1
 
 WHEN = datetime(2026, 10, 19, 17, 0, tzinfo=timezone.utc)
@@ -21,6 +21,40 @@ def player(match_id, hero_id, team, won, items, sold, bought=None):
         "items.sold_time_s": sold,
         "items.game_time_s": [0] * len(items) if bought is None else bought,
     }
+
+
+def test_purchase_log_keeps_a_sold_item():
+    items, times, sold = purchase_log([10, 30], [20, 0], [5, 20])
+
+    assert items == [10, 30]
+    assert times == [5, 20]
+    assert sold == [20, 0]
+
+
+def test_upgrade_pairs_link_one_item_bought_at_the_sale():
+    children, parents = upgrade_pairs([10, 30], [20, 0], [5, 20], [1, 0])
+
+    assert children == [30]
+    assert parents == [10]
+
+
+def test_upgrade_pairs_skip_two_purchases_at_the_same_second():
+    children, parents = upgrade_pairs(
+        [10, 20, 30, 40],
+        [15, 15, 0, 0],
+        [5, 6, 15, 15],
+        [1, 1, 0, 0],
+    )
+
+    assert children == []
+    assert parents == []
+
+
+def test_upgrade_pairs_keep_the_last_step_of_a_chain():
+    children, parents = upgrade_pairs([1, 2, 3], [10, 20, 0], [1, 10, 20], [1, 1, 0])
+
+    assert children == [3]
+    assert parents == [2]
 
 
 def test_build_rows_keeps_full_winning_team_only():
@@ -50,3 +84,22 @@ def test_build_rows_keeps_full_winning_team_only():
         assert len(record["enemy_heroes"]) == 6
         assert record["hero_id_target"] not in record["ally_heroes"]
         assert record["hero_id_target"] not in record["enemy_heroes"]
+
+
+def test_chart_rows_keep_wins_and_losses_from_a_full_match():
+    rows = []
+    for hero_id in range(1, 7):
+        rows.append(player(100, hero_id, TEAM0, True, [10], [0], [120]))
+    for hero_id in range(7, 13):
+        rows.append(player(100, hero_id, TEAM1, False, [20], [5], [80]))
+    for hero_id in range(101, 106):
+        rows.append(player(200, hero_id, TEAM0, True, [1], [0]))
+
+    result = chart_rows(pl.DataFrame(rows), SimpleNamespace(players_per_team=6))
+
+    assert result.height == 12
+    assert result.filter(pl.col("won")).height == 6
+    assert result.filter(~pl.col("won")).height == 6
+    loss = result.filter(pl.col("hero_id") == 7)
+    assert loss.get_column("purchase_items").to_list() == [[20]]
+    assert loss.get_column("purchase_times").to_list() == [[80]]

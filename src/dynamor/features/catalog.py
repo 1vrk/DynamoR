@@ -16,7 +16,10 @@ def hero_ids(frame: pl.DataFrame) -> list[int]:
 
 
 def item_ids(frame: pl.DataFrame) -> list[int]:
-    return sorted(set(_list_values(frame, "winning_items")))
+    collected = set(_list_values(frame, "winning_items"))
+    if "purchase_items" in frame.columns:
+        collected.update(_list_values(frame, "purchase_items"))
+    return sorted(collected)
 
 
 def index_of(ids: list[int]) -> dict[int, int]:

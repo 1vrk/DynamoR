@@ -7,9 +7,18 @@ import polars as pl
 import requests
 from scipy import sparse
 
-from dynamor.catalog.assets import hero_rows, item_rows, signature_class_names
+from dynamor.catalog.assets import (
+    format_scale_weights,
+    format_tags,
+    hero_close_categories,
+    hero_rows,
+    hero_scale_weights,
+    hero_threat_tags,
+    item_rows,
+    signature_class_names,
+)
 from dynamor.data.client import download_files, fetch_manifest, select_files
-from dynamor.data.extract import build_rows, scan_raw, write_interim
+from dynamor.data.extract import build_rows, chart_rows, scan_raw, write_interim
 from dynamor.data.filter import filter_matches
 from dynamor.features.catalog import hero_ids, item_ids, read_ids, write_ids
 from dynamor.features.drafts import draft_matrix
@@ -93,12 +102,27 @@ def refresh_is_due(finished_at: datetime | None, *, now: datetime) -> bool:
     return now - finished_at > DUE_AFTER
 
 
-def build_match_table(settings):
+def _filtered_matches(settings):
     paths = sorted(settings.raw_dir.glob("*.parquet"))
     if not paths:
         raise SystemExit(f"no parquet files in {settings.raw_dir}")
-    frame = build_rows(filter_matches(scan_raw(paths), settings), settings)
+    filtered = filter_matches(scan_raw(paths), settings)
+    if isinstance(filtered, pl.LazyFrame):
+        filtered = filtered.collect()
+    return filtered
+
+
+def build_hero_games(settings):
+    frame = chart_rows(_filtered_matches(settings), settings)
+    write_interim(frame, settings.hero_games_path)
+    return frame
+
+
+def build_match_table(settings):
+    filtered = _filtered_matches(settings)
+    frame = build_rows(filtered, settings)
     write_interim(frame, settings.interim_path)
+    write_interim(chart_rows(filtered, settings), settings.hero_games_path)
     return frame
 
 
@@ -114,9 +138,12 @@ def build_feature_matrices(settings) -> dict:
     targets = target_matrix(frame, items)
     item_times = item_time_matrix(frame, items)
     settings.rows_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.select("match_id", "hero_id_target", "average_badge", "start_time").write_parquet(
-        settings.rows_path
-    )
+    columns = ["match_id", "hero_id_target", "average_badge", "start_time"]
+    if "upgrade_child" in frame.columns and "upgrade_parent" in frame.columns:
+        columns.extend(["upgrade_child", "upgrade_parent"])
+    if {"purchase_items", "purchase_times", "purchase_sold"} <= set(frame.columns):
+        columns.extend(["purchase_items", "purchase_times", "purchase_sold"])
+    frame.select(columns).write_parquet(settings.rows_path)
     sparse.save_npz(settings.drafts_path, drafts)
     sparse.save_npz(settings.targets_path, targets)
     sparse.save_npz(settings.item_times_path, item_times)
@@ -149,6 +176,13 @@ def build_name_catalog(settings) -> dict:
     heroes_payload = _fetch_json(HEROES_URL)
     items_payload = _fetch_json(ITEMS_URL)
     heroes = hero_rows(heroes_payload, hero_catalog)
+    weights = hero_scale_weights(heroes_payload, items_payload)
+    close = hero_close_categories(heroes_payload, items_payload)
+    threats = hero_threat_tags(heroes_payload, items_payload)
+    for row in heroes:
+        row["scales"] = ",".join(close.get(row["id"], ()))
+        row["scale_weights"] = format_scale_weights(weights.get(row["id"], {}))
+        row["tags"] = format_tags(threats.get(row["id"], ()))
     items = item_rows(items_payload, item_catalog, signature_class_names(heroes_payload))
     _write_table(heroes, settings.hero_names_path)
     _write_table(items, settings.item_names_path)

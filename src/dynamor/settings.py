@@ -20,6 +20,7 @@ class Settings:
     hero_catalog_path: Path
     item_catalog_path: Path
     rows_path: Path
+    hero_games_path: Path
     drafts_path: Path
     targets_path: Path
     item_times_path: Path
@@ -44,6 +45,7 @@ def load_settings() -> Settings:
         hero_catalog_path=(ROOT / paths["hero_catalog_path"]).resolve(),
         item_catalog_path=(ROOT / paths["item_catalog_path"]).resolve(),
         rows_path=(ROOT / paths["rows_path"]).resolve(),
+        hero_games_path=(ROOT / paths["hero_games_path"]).resolve(),
         drafts_path=(ROOT / paths["drafts_path"]).resolve(),
         targets_path=(ROOT / paths["targets_path"]).resolve(),
         item_times_path=(ROOT / paths["item_times_path"]).resolve(),

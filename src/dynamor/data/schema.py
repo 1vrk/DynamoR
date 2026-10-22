@@ -12,6 +12,8 @@ SOURCE_COLUMNS = [
     "items.item_id",
     "items.sold_time_s",
     "items.game_time_s",
+    "items.upgrade_id",
+    "items.flags",
 ]
 
 OUTPUT_COLUMNS = [
@@ -21,6 +23,11 @@ OUTPUT_COLUMNS = [
     "enemy_heroes",
     "winning_items",
     "winning_item_times",
+    "upgrade_child",
+    "upgrade_parent",
+    "purchase_items",
+    "purchase_times",
+    "purchase_sold",
     "average_badge",
     "start_time",
 ]
