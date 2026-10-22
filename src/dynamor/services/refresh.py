@@ -7,7 +7,14 @@ import polars as pl
 import requests
 from scipy import sparse
 
-from dynamor.catalog.assets import hero_close_categories, hero_rows, item_rows, signature_class_names
+from dynamor.catalog.assets import (
+    format_scale_weights,
+    hero_close_categories,
+    hero_rows,
+    hero_scale_weights,
+    item_rows,
+    signature_class_names,
+)
 from dynamor.data.client import download_files, fetch_manifest, select_files
 from dynamor.data.extract import build_rows, scan_raw, write_interim
 from dynamor.data.filter import filter_matches
@@ -152,9 +159,11 @@ def build_name_catalog(settings) -> dict:
     heroes_payload = _fetch_json(HEROES_URL)
     items_payload = _fetch_json(ITEMS_URL)
     heroes = hero_rows(heroes_payload, hero_catalog)
+    weights = hero_scale_weights(heroes_payload, items_payload)
     close = hero_close_categories(heroes_payload, items_payload)
     for row in heroes:
         row["scales"] = ",".join(close.get(row["id"], ()))
+        row["scale_weights"] = format_scale_weights(weights.get(row["id"], {}))
     items = item_rows(items_payload, item_catalog, signature_class_names(heroes_payload))
     _write_table(heroes, settings.hero_names_path)
     _write_table(items, settings.item_names_path)

@@ -167,6 +167,8 @@ def _render_build() -> None:
         context.skills.get(own_id, []),
         context.upgrades,
         context.purchases,
+        context.scale_weights.get(own_id, {}),
+        context.item_stats,
     )
     if not build.items and not build.skills:
         st.info("No winning drafts for this hero")

@@ -43,6 +43,8 @@ class Context:
     upgrades: list[list[tuple[int, int]]]
     scales: dict[int, tuple[str, ...]]
     purchases: list[list[tuple[int, int, int]]]
+    scale_weights: dict[int, dict[str, float]]
+    item_stats: dict[int, dict[str, int]]
 
 
 def suggest(
@@ -60,6 +62,8 @@ def suggest(
     skill_ids=(),
     upgrades=(),
     purchases=(),
+    scale_weights=None,
+    item_stats=None,
 ) -> DraftBuild:
     query = enemy_vector(enemy_ids, hero_catalog)
     if query.nnz == 0:
@@ -69,15 +73,18 @@ def suggest(
     if len(neighbor_rows) == 0:
         return DraftBuild([], [])
     positions = index_of(item_catalog)
+    weights = {} if scale_weights is None else scale_weights
+    stats = {} if item_stats is None else item_stats
     ranked = rank_items(targets, neighbor_rows, np.flatnonzero(mask), item_catalog, len(item_catalog))
-    shop: list[ShownItem] = []
+    scored: list[tuple[float, ShownItem]] = []
     for item in ranked:
         shown = _shown_item(item, names, item_times, neighbor_rows, positions)
         if shown.category == "skill":
             continue
-        shop.append(shown)
-        if len(shop) == top_items:
-            break
+        factor = _selection_multiplier(shown, weights, stats.get(shown.item_id, {}))
+        scored.append((shown.score * factor, shown))
+    scored.sort(key=lambda row: (-row[0], row[1].item_id))
+    shop = [shown for _factor, shown in scored[:top_items]]
     shop.extend(_lane_items(purchases, neighbor_rows, {item.item_id for item in shop}, names))
     shop.sort(key=lambda row: (row.purchase_s is None, row.purchase_s or 0, row.item_id))
     shop = _attach_upgrades(shop, _modal_parents(upgrades, neighbor_rows))
@@ -148,6 +155,20 @@ INVEST_CATEGORIES = ("weapon", "vitality", "spirit")
 INVEST_TARGET = 4800
 LANE_SHARE = 0.4
 LANE_LIMIT = 8
+INVEST_ALPHA = 0.25
+STAT_ALPHA = 0.1
+MAX_BONUS = 0.5
+SPEED_WEIGHT = 0.25
+
+
+def _selection_multiplier(item: ShownItem, weights: dict[str, float], stats: dict[str, int]) -> float:
+    slot_weight = weights.get(item.category, 0.0)
+    cost = 0 if item.cost is None else item.cost
+    invest = slot_weight * min(cost, INVEST_TARGET) / INVEST_TARGET
+    stat_score = sum(stats.get(bucket, 0) * weights.get(bucket, 0.0) for bucket in INVEST_CATEGORIES)
+    stat_score += stats.get("speed", 0) * SPEED_WEIGHT
+    bonus = min(MAX_BONUS, INVEST_ALPHA * invest + STAT_ALPHA * stat_score)
+    return 1.0 + bonus
 
 
 def _lane_items(purchases, neighbor_rows, already: set[int], names) -> list[ShownItem]:
@@ -313,6 +334,42 @@ def _purchases(frame: pl.DataFrame) -> list[list[tuple[int, int, int]]]:
     return logs
 
 
+def _parse_numbered(text, cast):
+    parsed = {}
+    for part in str("" if text is None else text).split(","):
+        if ":" not in part:
+            continue
+        name, raw = part.split(":", 1)
+        name = name.strip()
+        if name == "":
+            continue
+        try:
+            parsed[name] = cast(raw.strip())
+        except ValueError:
+            continue
+    return parsed
+
+
+def _scale_weights_by_hero(frame: pl.DataFrame) -> dict[int, dict[str, float]]:
+    if "scale_weights" not in frame.columns:
+        return {}
+    return {
+        int(row["id"]): _parse_numbered(row["scale_weights"], float)
+        for row in frame.iter_rows(named=True)
+    }
+
+
+def _stats_by_item(frame: pl.DataFrame) -> dict[int, dict[str, int]]:
+    if "stats" not in frame.columns:
+        return {}
+    stats = {}
+    for row in frame.iter_rows(named=True):
+        parsed = _parse_numbered(row["stats"], int)
+        if parsed:
+            stats[int(row["id"])] = parsed
+    return stats
+
+
 def _scales_by_hero(frame: pl.DataFrame) -> dict[int, tuple[str, ...]]:
     if "scales" not in frame.columns:
         return {}
@@ -371,6 +428,8 @@ def load_context(settings) -> Context:
         upgrades=_upgrade_pairs(rows),
         scales=_scales_by_hero(hero_frame),
         purchases=_purchases(rows),
+        scale_weights=_scale_weights_by_hero(hero_frame),
+        item_stats=_stats_by_item(item_frame),
         names={
             int(row["id"]): (
                 row["name"],

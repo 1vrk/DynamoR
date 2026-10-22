@@ -274,3 +274,121 @@ def test_validate_draft_rejects_a_repeated_or_unknown_enemy():
     known = {1, 2, 3, 4, 5, 6}
     assert validate_draft(1, [2, 2, 3, 4, 5, 6], known) == "Enemy heroes must be different"
     assert validate_draft(1, [2, 3, 4, 5, 6, 7], known) == "Unknown hero"
+
+
+def _preference_rows():
+    index = csr_matrix([[1, 0, 0], [1, 0, 0], [1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix(
+        [[1, 1, 1], [1, 1, 1], [1, 1, 0], [1, 0, 0]],
+        dtype=np.uint8,
+    )
+    item_times = csr_matrix(
+        (
+            [20, 20, 20, 20, 300, 300, 300, 60, 60],
+            ([0, 1, 2, 3, 0, 1, 2, 0, 1], [0, 0, 0, 0, 1, 1, 1, 2, 2]),
+        ),
+        shape=(4, 3),
+        dtype=np.uint32,
+    )
+    names = {
+        10: ("Extra Health", "vitality", 800, None),
+        20: ("Close Quarters", "weapon", 800, None),
+        30: ("Boundless Spirit", "spirit", 3200, None),
+    }
+    return index, targets, item_times, names
+
+
+def _preference_build(index, targets, item_times, names, **kwargs):
+    return suggest(
+        5,
+        [1],
+        index,
+        targets,
+        np.array([5, 5, 5, 5]),
+        [1, 7, 60],
+        [10, 20, 30],
+        names,
+        item_times,
+        top_k=4,
+        top_items=2,
+        **kwargs,
+    )
+
+
+def test_spirit_stats_replace_a_higher_neighbor_score_and_time_still_orders_the_queue():
+    index, targets, item_times, names = _preference_rows()
+
+    build = _preference_build(
+        index,
+        targets,
+        item_times,
+        names,
+        scale_weights={"spirit": 1.0},
+        item_stats={30: {"spirit": 2}},
+    )
+
+    assert [item.item_id for item in build.items] == [10, 30]
+    assert build.items[0].purchase_s == 20
+    assert build.items[1].purchase_s == 60
+
+
+def test_suggest_without_weights_keeps_the_neighbor_score_order():
+    index, targets, item_times, names = _preference_rows()
+
+    build = _preference_build(index, targets, item_times, names)
+
+    assert [item.item_id for item in build.items] == [10, 20]
+
+
+def test_a_6400_item_does_not_outweigh_an_equal_4800_close():
+    index = csr_matrix([[1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix([[1, 1], [1, 1]], dtype=np.uint8)
+    item_times = csr_matrix(([100, 100, 100, 100], ([0, 0, 1, 1], [0, 1, 0, 1])), shape=(2, 2), dtype=np.uint32)
+    names = {
+        10: ("Improved Spirit", "spirit", 4800, None),
+        20: ("Boundless Spirit", "spirit", 6400, None),
+    }
+
+    build = suggest(
+        5,
+        [1],
+        index,
+        targets,
+        np.array([5, 5]),
+        [1, 7, 60],
+        [10, 20],
+        names,
+        item_times,
+        top_k=2,
+        top_items=1,
+        scale_weights={"spirit": 1.0},
+    )
+
+    assert [item.item_id for item in build.items] == [10]
+
+
+def test_lane_share_ignores_header_stats():
+    index = csr_matrix([[1, 0, 0], [1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix([[1], [1], [1]], dtype=np.uint8)
+    item_times = csr_matrix(([10, 10, 10], ([0, 1, 2], [0, 0, 0])), shape=(3, 1), dtype=np.uint32)
+    names = {10: ("Close Quarters", "weapon", 800, None), 98: ("Extra Spirit", "spirit", 800, None)}
+    purchases = [[(98, 60, 70), (10, 10, 0)], [(10, 10, 0)], [(10, 10, 0)]]
+
+    build = suggest(
+        5,
+        [1],
+        index,
+        targets,
+        np.array([5, 5, 5]),
+        [1, 7, 60],
+        [10, 98],
+        names,
+        item_times,
+        top_k=3,
+        top_items=15,
+        purchases=purchases,
+        scale_weights={"spirit": 1.0},
+        item_stats={98: {"spirit": 2}},
+    )
+
+    assert [item.item_id for item in build.items] == [10]

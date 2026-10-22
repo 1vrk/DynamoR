@@ -1,7 +1,15 @@
 import polars as pl
 
 from dynamor.features.catalog import hero_ids, index_of, item_ids, read_ids, write_ids
-from dynamor.catalog.assets import hero_close_categories, hero_rows, item_rows
+from dynamor.catalog.assets import (
+    format_scale_weights,
+    format_stats,
+    header_buckets,
+    hero_close_categories,
+    hero_rows,
+    hero_scale_weights,
+    item_rows,
+)
 
 
 def test_catalog_sorts_heroes_and_keeps_large_item_ids(tmp_path):
@@ -108,3 +116,129 @@ def test_hero_close_categories_skip_a_weak_spirit_scale():
     ]
 
     assert hero_close_categories(heroes, items)[84] == ("weapon",)
+
+
+def _spirit_scale(value: float) -> dict:
+    return {"scale_function": {"class_name": "scale_function_tech_damage", "stat_scale": value}}
+
+
+def _weapon_scale(value: float) -> dict:
+    return {
+        "scale_function": {
+            "class_name": "scale_function_ability_weapon_damage",
+            "specific_stat_scale_type": "EBaseWeaponDamageIncrease",
+            "stat_scale": value,
+        }
+    }
+
+
+def test_five_weak_spirit_scales_stay_below_the_weapon_share():
+    heroes = [{"id": 11, "items": {"signature1": "ability_mix"}}]
+    items = [
+        {
+            "class_name": "ability_mix",
+            "properties": {
+                **{f"Spirit{index}": _spirit_scale(0.05) for index in range(5)},
+                "Shot": _weapon_scale(1.2),
+            },
+        }
+    ]
+
+    assert hero_close_categories(heroes, items)[11] == ("weapon",)
+    assert hero_scale_weights(heroes, items)[11] == {"weapon": 1.0}
+
+
+def test_scale_weights_sum_magnitudes_instead_of_counting_properties():
+    heroes = [{"id": 12, "items": {"signature1": "ability_mix"}}]
+    items = [
+        {
+            "class_name": "ability_mix",
+            "properties": {
+                **{f"Spirit{index}": _spirit_scale(0.2) for index in range(5)},
+                "Shot": _weapon_scale(6.0),
+            },
+        }
+    ]
+
+    weights = hero_scale_weights(heroes, items)[12]
+
+    assert hero_close_categories(heroes, items)[12] == ("weapon",)
+    assert set(weights) == {"weapon"}
+    assert format_scale_weights(weights) == "weapon:0.86"
+
+
+def test_header_buckets_count_bullet_resilience_and_skip_the_passive():
+    item = {
+        "tooltip_sections": [
+            {
+                "section_type": "innate",
+                "section_attributes": [
+                    {
+                        "elevated_properties": ["BulletResist", "TechPowerPercent"],
+                        "properties": [
+                            "OutOfCombatHealthRegen",
+                            "TechPower",
+                            "BonusHealth",
+                            "SpiritResist",
+                            "AbilityCooldown",
+                        ],
+                    }
+                ],
+            },
+            {
+                "section_type": "passive",
+                "section_attributes": [
+                    {"important_properties": ["BulletResistBelowThreshold", "HealthThreshold"]}
+                ],
+            },
+        ]
+    }
+
+    assert header_buckets(item) == {"vitality": 4, "spirit": 3}
+    assert format_stats(header_buckets(item)) == "spirit:3,vitality:4"
+
+
+def test_header_buckets_fall_back_to_elevated_flags_without_sections():
+    item = {
+        "properties": {
+            "BulletResist": {"tooltip_is_elevated": True},
+            "BonusMoveSpeed": {"tooltip_is_elevated": True},
+            "BulletResistBelowThreshold": {"tooltip_is_elevated": False},
+        }
+    }
+
+    assert header_buckets(item) == {"vitality": 1, "speed": 1}
+    assert format_stats(header_buckets(item)) == "vitality:1,speed:1"
+
+
+def test_item_rows_store_header_stats():
+    payload = [
+        {
+            "id": 10,
+            "name": "Bullet Resilience",
+            "type": "upgrade",
+            "item_slot_type": "vitality",
+            "item_tier": 3,
+            "tooltip_sections": [
+                {
+                    "section_type": "innate",
+                    "section_attributes": [
+                        {
+                            "elevated_properties": ["BulletResist"],
+                            "properties": ["OutOfCombatHealthRegen"],
+                        }
+                    ],
+                },
+                {
+                    "section_type": "passive",
+                    "section_attributes": [
+                        {"important_properties": ["BulletResistBelowThreshold"]}
+                    ],
+                },
+            ],
+        }
+    ]
+
+    rows = item_rows(payload, {10})
+
+    assert rows[0]["stats"] == "vitality:2"

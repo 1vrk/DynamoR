@@ -62,15 +62,27 @@ def categories_of_scale(scale) -> set[str]:
     return found
 
 
-def hero_close_categories(heroes, items) -> dict[int, tuple[str, ...]]:
+def scale_magnitudes(scale) -> dict[str, float]:
+    if not isinstance(scale, dict):
+        return {}
+    try:
+        value = float(scale.get("stat_scale"))
+    except (TypeError, ValueError):
+        return {}
+    if value < _SCALE_MIN:
+        return {}
+    return {category: value for category in categories_of_scale(scale)}
+
+
+def hero_scale_weights(heroes, items) -> dict[int, dict[str, float]]:
     by_class = {}
     for item in items:
         class_name = item.get("class_name")
         if class_name and class_name not in by_class:
             by_class[str(class_name)] = item
-    result: dict[int, tuple[str, ...]] = {}
+    result: dict[int, dict[str, float]] = {}
     for hero in heroes:
-        counts: dict[str, int] = {}
+        totals: dict[str, float] = {}
         slots = hero.get("items") or {}
         if not isinstance(slots, dict):
             continue
@@ -84,11 +96,108 @@ def hero_close_categories(heroes, items) -> dict[int, tuple[str, ...]]:
             for prop in props.values():
                 if not isinstance(prop, dict):
                     continue
-                for category in categories_of_scale(prop.get("scale_function")):
-                    counts[category] = counts.get(category, 0) + 1
-        ranked = sorted(counts, key=lambda name: (-counts[name], name))
-        result[int(hero["id"])] = tuple(ranked[:2])
+                for category, value in scale_magnitudes(prop.get("scale_function")).items():
+                    totals[category] = totals.get(category, 0.0) + value
+        total = sum(totals.values())
+        if total <= 0:
+            result[int(hero["id"])] = {}
+            continue
+        result[int(hero["id"])] = {
+            name: amount / total
+            for name, amount in totals.items()
+            if amount / total >= _SCALE_MIN
+        }
     return result
+
+
+def hero_close_categories(heroes, items) -> dict[int, tuple[str, ...]]:
+    return {
+        hero_id: tuple(sorted(weights, key=lambda name: (-weights[name], name)))
+        for hero_id, weights in hero_scale_weights(heroes, items).items()
+    }
+
+
+def format_scale_weights(weights: dict[str, float]) -> str:
+    ranked = sorted(weights, key=lambda name: (-weights[name], name))
+    return ",".join(f"{name}:{weights[name]:.2f}" for name in ranked)
+
+
+_STAT_ORDER = ("spirit", "weapon", "vitality", "speed")
+
+
+def bucket_of(name: str) -> str | None:
+    key = str(name).lower().replace("_", "")
+    if "movespeed" in key or "sprintspeed" in key:
+        return "speed"
+    if "resist" in key or "lifesteal" in key:
+        return "vitality"
+    if any(token in key for token in ("health", "heal", "regen")):
+        return "vitality"
+    if "cooldown" in key:
+        return "spirit"
+    if "spiritpower" in key or "techpower" in key:
+        return "spirit"
+    if any(token in key for token in ("weapon", "firerate", "bulletdamage", "melee")):
+        return "weapon"
+    return None
+
+
+def _add_header_name(names: list[str], seen: set[str], name) -> None:
+    text = str(name)
+    if text in seen:
+        return
+    seen.add(text)
+    names.append(text)
+
+
+def _header_property_names(item) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    innate = [
+        section
+        for section in item.get("tooltip_sections") or []
+        if isinstance(section, dict) and str(section.get("section_type") or "") == "innate"
+    ]
+    if innate:
+        for section in innate:
+            for attribute in section.get("section_attributes") or []:
+                if not isinstance(attribute, dict):
+                    continue
+                for field in ("elevated_properties", "properties"):
+                    for name in attribute.get(field) or []:
+                        _add_header_name(names, seen, name)
+        return names
+    props = item.get("properties") or {}
+    if isinstance(props, dict) and any(
+        isinstance(prop, dict) and "tooltip_is_elevated" in prop for prop in props.values()
+    ):
+        for key, prop in props.items():
+            if isinstance(prop, dict) and prop.get("tooltip_is_elevated"):
+                _add_header_name(names, seen, key)
+        return names
+    for section in item.get("tooltip_sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for attribute in section.get("section_attributes") or []:
+            if not isinstance(attribute, dict):
+                continue
+            for name in attribute.get("elevated_properties") or []:
+                _add_header_name(names, seen, name)
+    return names
+
+
+def header_buckets(item) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for name in _header_property_names(item):
+        bucket = bucket_of(name)
+        if bucket is None:
+            continue
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
+def format_stats(counts: dict[str, int]) -> str:
+    return ",".join(f"{name}:{counts[name]}" for name in _STAT_ORDER if counts.get(name))
 
 
 def signature_class_names(heroes) -> set[str]:
@@ -144,7 +253,7 @@ def hero_rows(payload, allowed_ids) -> list[dict]:
 def item_rows(payload, allowed_ids, signature_names=None) -> list[dict]:
     allowed = {int(item_id) for item_id in allowed_ids}
     signatures = set(signature_names or [])
-    rows: dict[int, tuple[str, str, int | None, str | None, int | None]] = {}
+    rows: dict[int, tuple[str, str, int | None, str | None, int | None, str]] = {}
     for item in payload:
         item_id = int(item["id"])
         if item_id not in allowed or item_id in rows:
@@ -164,10 +273,11 @@ def item_rows(payload, allowed_ids, signature_names=None) -> list[dict]:
             cost_of(item),
             image_of(item),
             owner,
+            format_stats(header_buckets(item)),
         )
     for item_id in allowed:
         if item_id not in rows:
-            rows[item_id] = (str(item_id), "other", None, None, None)
+            rows[item_id] = (str(item_id), "other", None, None, None, "")
     return [
         {
             "id": item_id,
@@ -176,6 +286,7 @@ def item_rows(payload, allowed_ids, signature_names=None) -> list[dict]:
             "cost": cost,
             "image": image,
             "owner": owner,
+            "stats": stats,
         }
-        for item_id, (name, category, cost, image, owner) in sorted(rows.items())
+        for item_id, (name, category, cost, image, owner, stats) in sorted(rows.items())
     ]
