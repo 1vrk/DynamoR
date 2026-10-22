@@ -45,6 +45,9 @@ class Context:
     purchases: list[list[tuple[int, int, int]]]
     scale_weights: dict[int, dict[str, float]]
     item_stats: dict[int, dict[str, int]]
+    hero_tags: dict[int, tuple[str, ...]]
+    item_answers: dict[int, tuple[str, ...]]
+    item_effects: dict[int, dict[str, float]] | None
 
 
 def suggest(
@@ -64,6 +67,9 @@ def suggest(
     purchases=(),
     scale_weights=None,
     item_stats=None,
+    hero_tags=None,
+    item_answers=None,
+    item_effects=None,
 ) -> DraftBuild:
     query = enemy_vector(enemy_ids, hero_catalog)
     if query.nnz == 0:
@@ -75,13 +81,31 @@ def suggest(
     positions = index_of(item_catalog)
     weights = {} if scale_weights is None else scale_weights
     stats = {} if item_stats is None else item_stats
+    threats = _enemy_threats(enemy_ids, {} if hero_tags is None else hero_tags)
+    answers = {} if item_answers is None else item_answers
     ranked = rank_items(targets, neighbor_rows, np.flatnonzero(mask), item_catalog, len(item_catalog))
-    scored: list[tuple[float, ShownItem]] = []
+    kept: list[ShownItem] = []
     for item in ranked:
         shown = _shown_item(item, names, item_times, neighbor_rows, positions)
         if shown.category == "skill":
             continue
-        factor = _selection_multiplier(shown, weights, stats.get(shown.item_id, {}))
+        kept.append(shown)
+    timeline = sorted(kept, key=lambda row: (row.purchase_s is None, row.purchase_s or 0, row.item_id))
+    linked = _attach_upgrades(timeline, _modal_parents(upgrades, neighbor_rows))
+    fractions = _curve_fractions(linked)
+    use_effects = item_effects is not None
+    effects = {} if item_effects is None else item_effects
+    scored: list[tuple[float, ShownItem]] = []
+    for shown in kept:
+        owned = effects.get(shown.item_id, {}) if use_effects else None
+        factor = _selection_multiplier(
+            shown,
+            weights,
+            stats.get(shown.item_id, {}),
+            _threat_bonus(answers.get(shown.item_id, ()), threats, owned),
+            fractions.get(shown.item_id, 0.0),
+            owned,
+        )
         scored.append((shown.score * factor, shown))
     scored.sort(key=lambda row: (-row[0], row[1].item_id))
     shop = [shown for _factor, shown in scored[:top_items]]
@@ -159,15 +183,136 @@ INVEST_ALPHA = 0.25
 STAT_ALPHA = 0.1
 MAX_BONUS = 0.5
 SPEED_WEIGHT = 0.25
+TAG_ALPHA = 0.2
+THREAT_MIN_ENEMIES = 2
+LINE_UNIT = 0.30
+CURVE_SOULS = (800, 1600, 2400, 3200, 4800, 6400, 8000, 11200, 16000, 22400, 28800)
+CURVE_BONUS = {
+    "weapon": (9, 12, 15, 18, 46, 54, 62, 74, 86, 100, 115),
+    "vitality": (9, 12, 15, 20, 38, 42, 46, 50, 54, 60, 66),
+    "spirit": (7, 11, 15, 19, 38, 45, 52, 59, 66, 75, 100),
+}
+CURVE_AT_4800 = {category: float(steps[4]) for category, steps in CURVE_BONUS.items()}
+_ANSWER_OF = {
+    "weapon": "defense",
+    "spirit": "defense",
+    "control": "defense",
+    "heal": "antiheal",
+}
+_EFFECT_SLOT = {
+    "weapon_damage": "weapon",
+    "fire_rate": "weapon",
+    "melee": "weapon",
+    "spirit": "spirit",
+    "health": "vitality",
+    "heal": "vitality",
+    "lifesteal": "vitality",
+}
+_OPEN_EFFECTS = frozenset({"move_speed", "stamina"})
+_RESIST_THREAT = {
+    "bullet_resist": "weapon",
+    "spirit_resist": "spirit",
+    "debuff_resist": "control",
+}
 
 
-def _selection_multiplier(item: ShownItem, weights: dict[str, float], stats: dict[str, int]) -> float:
+def _enemy_threats(enemy_ids, hero_tags: dict[int, tuple[str, ...]]) -> dict[str, float]:
+    picked = [int(enemy) for enemy in enemy_ids if enemy is not None]
+    total = len(picked)
+    if total == 0 or not hero_tags:
+        return {}
+    counts: dict[str, int] = {}
+    for enemy in picked:
+        for tag in hero_tags.get(enemy, ()):
+            if tag in _ANSWER_OF:
+                counts[tag] = counts.get(tag, 0) + 1
+    return {tag: count / total for tag, count in counts.items() if count >= THREAT_MIN_ENEMIES}
+
+
+def curve_bonus(category: str, souls: int) -> float:
+    steps = CURVE_BONUS.get(category)
+    if not steps:
+        return 0.0
+    reached = 0.0
+    for threshold, value in zip(CURVE_SOULS, steps):
+        if souls < threshold:
+            break
+        reached = float(value)
+    return reached
+
+
+def _curve_fractions(items: list[ShownItem]) -> dict[int, float]:
+    totals = {category: 0 for category in INVEST_CATEGORIES}
+    replaced: set[int] = set()
+    by_id = {item.item_id: item for item in items}
+    fractions: dict[int, float] = {}
+    for item in items:
+        full = CURVE_AT_4800.get(item.category)
+        if full is None or item.cost is None:
+            fractions[item.item_id] = 0.0
+            continue
+        added = item.cost
+        parent = by_id.get(item.upgrade_from) if item.upgrade_from is not None else None
+        if (
+            parent is not None
+            and parent.item_id not in replaced
+            and parent.cost is not None
+            and parent.cost < item.cost
+        ):
+            added = item.cost - parent.cost
+            replaced.add(parent.item_id)
+        before = totals[item.category]
+        totals[item.category] = before + added
+        delta = curve_bonus(item.category, totals[item.category]) - curve_bonus(item.category, before)
+        fractions[item.item_id] = delta / full
+    return fractions
+
+
+def _effect_stat_score(effects: dict[str, float], weights: dict[str, float]) -> float:
+    score = 0.0
+    for key, value in effects.items():
+        if key in _OPEN_EFFECTS:
+            score += value / LINE_UNIT
+        elif key in _EFFECT_SLOT:
+            score += (value / LINE_UNIT) * weights.get(_EFFECT_SLOT[key], 0.0)
+    return score
+
+
+def _threat_bonus(answers, threats: dict[str, float], effects: dict[str, float] | None = None) -> float:
+    if not threats:
+        return 0.0
+    if effects is None:
+        if not answers:
+            return 0.0
+        owned = set(answers)
+        return TAG_ALPHA * sum(share for threat, share in threats.items() if _ANSWER_OF[threat] in owned)
+    bonus = 0.0
+    if answers and "antiheal" in set(answers):
+        bonus += TAG_ALPHA * threats.get("heal", 0.0)
+    for key, threat in _RESIST_THREAT.items():
+        value = float(effects.get(key, 0.0) or 0.0)
+        share = threats.get(threat, 0.0)
+        if value and share:
+            bonus += TAG_ALPHA * share * (value / LINE_UNIT)
+    return bonus
+
+
+def _selection_multiplier(
+    item: ShownItem,
+    weights: dict[str, float],
+    stats: dict[str, int],
+    threat_bonus: float = 0.0,
+    invest_fraction: float = 0.0,
+    effects: dict[str, float] | None = None,
+) -> float:
     slot_weight = weights.get(item.category, 0.0)
-    cost = 0 if item.cost is None else item.cost
-    invest = slot_weight * min(cost, INVEST_TARGET) / INVEST_TARGET
-    stat_score = sum(stats.get(bucket, 0) * weights.get(bucket, 0.0) for bucket in INVEST_CATEGORIES)
-    stat_score += stats.get("speed", 0) * SPEED_WEIGHT
-    bonus = min(MAX_BONUS, INVEST_ALPHA * invest + STAT_ALPHA * stat_score)
+    invest = slot_weight * invest_fraction
+    if effects is None:
+        stat_score = sum(stats.get(bucket, 0) * weights.get(bucket, 0.0) for bucket in INVEST_CATEGORIES)
+        stat_score += stats.get("speed", 0) * SPEED_WEIGHT
+    else:
+        stat_score = _effect_stat_score(effects, weights)
+    bonus = min(MAX_BONUS, INVEST_ALPHA * invest + STAT_ALPHA * stat_score + threat_bonus)
     return 1.0 + bonus
 
 
@@ -359,6 +504,28 @@ def _scale_weights_by_hero(frame: pl.DataFrame) -> dict[int, dict[str, float]]:
     }
 
 
+def _tags_by_id(frame: pl.DataFrame, column: str) -> dict[int, tuple[str, ...]]:
+    if column not in frame.columns:
+        return {}
+    parsed = {}
+    for row in frame.iter_rows(named=True):
+        tags = tuple(part.strip() for part in str(row[column] or "").split(",") if part.strip())
+        if tags:
+            parsed[int(row["id"])] = tags
+    return parsed
+
+
+def _effects_by_item(frame: pl.DataFrame) -> dict[int, dict[str, float]] | None:
+    if "effects" not in frame.columns:
+        return None
+    effects = {}
+    for row in frame.iter_rows(named=True):
+        parsed = _parse_numbered(row["effects"], float)
+        if parsed:
+            effects[int(row["id"])] = parsed
+    return effects
+
+
 def _stats_by_item(frame: pl.DataFrame) -> dict[int, dict[str, int]]:
     if "stats" not in frame.columns:
         return {}
@@ -430,6 +597,9 @@ def load_context(settings) -> Context:
         purchases=_purchases(rows),
         scale_weights=_scale_weights_by_hero(hero_frame),
         item_stats=_stats_by_item(item_frame),
+        hero_tags=_tags_by_id(hero_frame, "tags"),
+        item_answers=_tags_by_id(item_frame, "answers"),
+        item_effects=_effects_by_item(item_frame),
         names={
             int(row["id"]): (
                 row["name"],

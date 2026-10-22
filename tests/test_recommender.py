@@ -3,6 +3,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from dynamor.services.recommender import (
     ShownItem,
+    curve_bonus,
     format_item,
     group_items,
     group_phases,
@@ -389,6 +390,247 @@ def test_lane_share_ignores_header_stats():
         purchases=purchases,
         scale_weights={"spirit": 1.0},
         item_stats={98: {"spirit": 2}},
+    )
+
+    assert [item.item_id for item in build.items] == [10]
+
+
+def _heal_answer_build(*, hero_tags=None, item_answers=None, item_effects=None):
+    index = csr_matrix([[1, 0, 0], [1, 0, 0], [1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix(
+        [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 0, 0]],
+        dtype=np.uint8,
+    )
+    item_times = csr_matrix(
+        (
+            [30, 30, 30, 30, 10, 10, 10, 90, 90, 90],
+            ([0, 1, 2, 3, 0, 1, 2, 0, 1, 2], [0, 0, 0, 0, 1, 1, 1, 2, 2, 2]),
+        ),
+        shape=(4, 3),
+        dtype=np.uint32,
+    )
+    names = {
+        10: ("Close Quarters", "weapon", 800, None),
+        15: ("Healing Nova", "vitality", 1600, None),
+        20: ("Healbane", "spirit", 1600, None),
+    }
+    return suggest(
+        5,
+        [1, 1, 1, 1],
+        index,
+        targets,
+        np.array([5, 5, 5, 5]),
+        [1, 7, 60],
+        [10, 15, 20],
+        names,
+        item_times,
+        top_k=4,
+        top_items=2,
+        hero_tags=hero_tags,
+        item_answers=item_answers,
+        item_effects=item_effects,
+    )
+
+
+def test_enemy_heal_raises_antiheal_and_time_still_orders_the_queue():
+    answers = {15: ("heal",), 20: ("antiheal",), 40: ("antiheal",)}
+
+    build = _heal_answer_build(hero_tags={1: ("heal",)}, item_answers=answers)
+
+    assert [item.item_id for item in build.items] == [10, 20]
+    assert build.items[0].purchase_s == 30
+    assert build.items[1].purchase_s == 90
+
+
+def test_suggest_without_threat_tags_keeps_the_neighbor_order():
+    build = _heal_answer_build()
+
+    assert [item.item_id for item in build.items] == [15, 10]
+
+
+def test_curve_bonus_is_the_threshold_already_reached():
+    assert curve_bonus("weapon", 0) == 0
+    assert curve_bonus("weapon", 1600) == 12
+    assert curve_bonus("weapon", 3200) == 18
+    assert curve_bonus("weapon", 4000) == 18
+    assert curve_bonus("weapon", 4800) == 46
+    assert curve_bonus("weapon", 6400) == 54
+    assert curve_bonus("weapon", 4800) - curve_bonus("weapon", 3200) == 28
+    assert curve_bonus("vitality", 4800) == 38
+    assert curve_bonus("spirit", 4800) == 38
+
+
+def _two_item_build(names, item_times, *, top_items, enemies=None, **kwargs):
+    index = csr_matrix([[1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix([[1, 1], [1, 1]], dtype=np.uint8)
+    return suggest(
+        5,
+        [1, 1] if enemies is None else enemies,
+        index,
+        targets,
+        np.array([5, 5]),
+        [1, 7, 60],
+        [10, 20],
+        names,
+        item_times,
+        top_k=2,
+        top_items=top_items,
+        **kwargs,
+    )
+
+
+def test_a_later_1600_outranks_the_3200_step_and_time_stays_first():
+    item_times = csr_matrix(
+        ([100, 400, 100, 400], ([0, 0, 1, 1], [0, 1, 0, 1])),
+        shape=(2, 2),
+        dtype=np.uint32,
+    )
+    names = {
+        10: ("Titanic Magazine", "weapon", 3200, None),
+        20: ("Close Quarters", "weapon", 1600, None),
+    }
+
+    best = _two_item_build(names, item_times, top_items=1, scale_weights={"weapon": 1.0})
+    shown = _two_item_build(names, item_times, top_items=2, scale_weights={"weapon": 1.0})
+
+    assert [item.item_id for item in best.items] == [20]
+    assert [item.item_id for item in shown.items] == [10, 20]
+    assert shown.items[0].purchase_s == 100
+
+
+def test_upgrade_reaches_the_3200_bonus_instead_of_4000_souls():
+    index = csr_matrix([[1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix([[1, 1, 1], [1, 1, 1]], dtype=np.uint8)
+    item_times = csr_matrix(
+        ([10, 40, 80, 10, 40, 80], ([0, 0, 0, 1, 1, 1], [0, 1, 2, 0, 1, 2])),
+        shape=(2, 3),
+        dtype=np.uint32,
+    )
+    names = {
+        10: ("Extra Spirit", "weapon", 800, None),
+        20: ("Improved Spirit", "weapon", 3200, None),
+        30: ("Close Quarters", "weapon", 800, None),
+    }
+
+    build = suggest(
+        5,
+        [1],
+        index,
+        targets,
+        np.array([5, 5]),
+        [1, 7, 60],
+        [10, 20, 30],
+        names,
+        item_times,
+        top_k=2,
+        top_items=2,
+        upgrades=[[(20, 10)], [(20, 10)]],
+        scale_weights={"weapon": 1.0},
+    )
+
+    assert [item.item_id for item in build.items] == [10, 20]
+    assert build.items[1].upgrade_from == 10
+
+
+def test_weapon_damage_raises_an_item_and_penalties_lower_it():
+    item_times = csr_matrix(
+        ([100, 100, 100, 100], ([0, 0, 1, 1], [0, 1, 0, 1])),
+        shape=(2, 2),
+        dtype=np.uint32,
+    )
+    names = {
+        10: ("Close Quarters", "weapon", 1600, None),
+        20: ("Weighted Shots", "weapon", 1600, None),
+    }
+
+    raised = _two_item_build(
+        names,
+        item_times,
+        top_items=1,
+        scale_weights={"weapon": 1.0},
+        item_effects={20: {"weapon_damage": 0.30}},
+    )
+    lowered = _two_item_build(
+        names,
+        item_times,
+        top_items=1,
+        scale_weights={"weapon": 1.0},
+        item_effects={20: {"weapon_damage": 0.30, "stamina": -0.14, "move_speed": -0.5}},
+    )
+
+    assert [item.item_id for item in raised.items] == [20]
+    assert [item.item_id for item in lowered.items] == [10]
+
+
+def test_bullet_resist_answers_weapon_and_spirit_resist_answers_spirit():
+    item_times = csr_matrix(
+        ([100, 100, 100, 100], ([0, 0, 1, 1], [0, 1, 0, 1])),
+        shape=(2, 2),
+        dtype=np.uint32,
+    )
+    names = {
+        10: ("Close Quarters", "weapon", 800, None),
+        20: ("Bullet Resilience", "vitality", 800, None),
+    }
+
+    def picked(tags, effects):
+        return _two_item_build(
+            names,
+            item_times,
+            top_items=1,
+            hero_tags={1: tags},
+            item_effects=effects,
+        )
+
+    assert [item.item_id for item in picked(("weapon",), {20: {"bullet_resist": 0.30}}).items] == [20]
+    assert [item.item_id for item in picked(("spirit",), {20: {"bullet_resist": 0.30}}).items] == [10]
+    assert [item.item_id for item in picked(("spirit",), {20: {"spirit_resist": 0.30}}).items] == [20]
+    assert [item.item_id for item in picked(("weapon",), {20: {"spirit_resist": 0.30}}).items] == [10]
+    defense = _two_item_build(
+        names,
+        item_times,
+        top_items=1,
+        hero_tags={1: ("weapon",)},
+        item_answers={20: ("defense",)},
+        item_effects={},
+    )
+    assert [item.item_id for item in defense.items] == [10]
+
+
+def test_heal_reduction_still_answers_heal_when_effects_are_present():
+    build = _heal_answer_build(
+        hero_tags={1: ("heal",)},
+        item_answers={20: ("antiheal",)},
+        item_effects={},
+    )
+
+    assert [item.item_id for item in build.items] == [10, 20]
+
+
+def test_an_item_neighbors_did_not_keep_stays_out_of_the_fifteen():
+    index = csr_matrix([[1, 0, 0], [1, 0, 0]], dtype=np.float64)
+    targets = csr_matrix([[1, 0], [1, 0]], dtype=np.uint8)
+    item_times = csr_matrix(([10, 10], ([0, 1], [0, 0])), shape=(2, 2), dtype=np.uint32)
+    names = {
+        10: ("Close Quarters", "weapon", 800, None),
+        40: ("Weighted Shots", "weapon", 3200, None),
+    }
+
+    build = suggest(
+        5,
+        [1, 1],
+        index,
+        targets,
+        np.array([5, 5]),
+        [1, 7, 60],
+        [10, 40],
+        names,
+        item_times,
+        top_k=2,
+        top_items=15,
+        scale_weights={"weapon": 1.0},
+        hero_tags={1: ("weapon",)},
+        item_effects={40: {"weapon_damage": 0.30, "bullet_resist": 0.30}},
     )
 
     assert [item.item_id for item in build.items] == [10]

@@ -200,6 +200,291 @@ def format_stats(counts: dict[str, int]) -> str:
     return ",".join(f"{name}:{counts[name]}" for name in _STAT_ORDER if counts.get(name))
 
 
+_TAG_ORDER = ("weapon", "spirit", "heal", "control", "defense")
+_ANSWER_ORDER = ("defense", "antiheal")
+_HERO_THREATS = frozenset({"weapon", "spirit", "heal", "control"})
+
+
+def format_tags(tags) -> str:
+    owned = set(tags)
+    return ",".join(name for name in _TAG_ORDER if name in owned)
+
+
+def format_answers(answers) -> str:
+    owned = set(answers)
+    return ",".join(name for name in _ANSWER_ORDER if name in owned)
+
+
+def _compact_name(name: str) -> str:
+    return str(name).lower().replace("_", "")
+
+
+def _scale_tag(scale) -> str | None:
+    if not isinstance(scale, dict):
+        return None
+    class_name = str(scale.get("class_name") or "")
+    stats = []
+    if scale.get("specific_stat_scale_type"):
+        stats.append(str(scale["specific_stat_scale_type"]))
+    stats.extend(str(item) for item in (scale.get("scaling_stats") or []))
+    if any(stat in {"ETechCooldown", "ETechDuration", "ETechRange", "ETechRadius"} for stat in stats):
+        return None
+    if "tech_damage" in class_name:
+        return "spirit"
+    if "weapon" in class_name or any(stat in _WEAPON_STATS for stat in stats):
+        return "weapon"
+    if "healing" in class_name or "EHealingOutput" in stats:
+        return "heal"
+    return None
+
+
+def _mentions_heal(key: str) -> bool:
+    if "lifesteal" in key or "healing" in key:
+        return True
+    return "heal" in key.replace("health", "")
+
+
+def _property_is_live(prop) -> bool:
+    if not isinstance(prop, dict):
+        return False
+    value = prop.get("value")
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text.endswith("m") or text.endswith("s"):
+            text = text[:-1]
+        try:
+            value = float(text)
+        except ValueError:
+            return text not in ("", "0", "0.0")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = None
+    if number is not None and number != 0:
+        return True
+    scale = prop.get("scale_function")
+    if isinstance(scale, dict):
+        try:
+            magnitude = float(scale.get("stat_scale"))
+        except (TypeError, ValueError):
+            magnitude = 0.0
+        if magnitude >= _SCALE_MIN:
+            return True
+    return False
+
+
+def property_marks(name: str, scale=None) -> tuple[set[str], set[str]]:
+    key = _compact_name(name)
+    generic = any(token in key for token in ("cooldown", "duration", "radius", "range"))
+    threat = any(
+        token in key
+        for token in ("slow", "stun", "silence", "root", "immobil", "disarm", "heal", "resist", "weapon", "spirit", "techpower")
+    )
+    if generic and not threat:
+        return set(), set()
+    if ("movespeed" in key or "sprintspeed" in key) and "slow" not in key:
+        return set(), set()
+    if _mentions_heal(key) and ("penalty" in key or "disablehealing" in key):
+        return set(), {"antiheal"}
+    if ("resist" in key or "armor" in key) and ("reduction" in key or "shred" in key):
+        return set(), set()
+    if any(token in key for token in ("slow", "stun", "silence", "root", "immobil", "disarm")) and "resist" not in key:
+        return {"control"}, set()
+    if "resist" in key:
+        return {"defense"}, {"defense"}
+    if _mentions_heal(key):
+        return {"heal"}, set()
+    if any(token in key for token in ("weapondamage", "weaponpower", "attackdamage", "bulletdamage", "firerate", "meleedamage")) or (
+        "melee" in key and "damage" in key
+    ):
+        return {"weapon"}, set()
+    if any(token in key for token in ("techpower", "spiritpower", "spiritdamage", "techdamage", "bonusspirit")):
+        return {"spirit"}, set()
+    scaled = _scale_tag(scale)
+    if scaled is None:
+        return set(), set()
+    return {scaled}, set()
+
+
+def _listed_property_names(item) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for section in item.get("tooltip_sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for attribute in section.get("section_attributes") or []:
+            if not isinstance(attribute, dict):
+                continue
+            for field in ("elevated_properties", "properties", "important_properties"):
+                for raw in attribute.get(field) or []:
+                    if isinstance(raw, dict):
+                        raw = raw.get("important_property") or raw.get("name")
+                    if raw is None:
+                        continue
+                    text = str(raw)
+                    if text in seen:
+                        continue
+                    seen.add(text)
+                    names.append(text)
+    return names
+
+
+_EFFECT_ORDER = (
+    "weapon_damage",
+    "fire_rate",
+    "melee",
+    "spirit",
+    "health",
+    "heal",
+    "lifesteal",
+    "move_speed",
+    "stamina",
+    "bullet_resist",
+    "spirit_resist",
+    "debuff_resist",
+)
+
+
+def _effect_channel(name: str) -> str | None:
+    key = _compact_name(name)
+    if ("resist" in key or "armor" in key) and ("reduction" in key or "shred" in key):
+        return None
+    if "bulletresist" in key or "bulletarmor" in key:
+        return "bullet_resist"
+    if "techresist" in key or "spiritresist" in key:
+        return "spirit_resist"
+    if any(token in key for token in ("statusresist", "debuffresist", "slowresist")):
+        return "debuff_resist"
+    if "stamina" in key:
+        return "stamina"
+    if ("movespeed" in key or "sprintspeed" in key) and "slow" not in key:
+        return "move_speed"
+    if "lifesteal" in key:
+        return "lifesteal"
+    if _mentions_heal(key) and "penalty" not in key and "disablehealing" not in key:
+        return "heal"
+    if "health" in key and "threshold" not in key and "regen" not in key:
+        return "health"
+    if "firerate" in key and "slow" not in key:
+        return "fire_rate"
+    if "meleedamage" in key or ("melee" in key and "damage" in key):
+        return "melee"
+    if any(token in key for token in ("weapondamage", "weaponpower", "attackdamage", "bulletdamage")):
+        return "weapon_damage"
+    if any(token in key for token in ("techpower", "spiritpower", "bonusspirit")):
+        return "spirit"
+    return None
+
+
+def _signed_number(prop) -> tuple[float, str] | None:
+    if not isinstance(prop, dict) or prop.get("value") is None:
+        return None
+    text = str(prop.get("value")).strip().lower().replace(" ", "")
+    postfix = str(prop.get("postfix") or "").strip().lower()
+    prefix = str(prop.get("prefix") or "").strip()
+    if text.endswith("m/s"):
+        text = text[:-3]
+    elif text.endswith("m"):
+        text = text[:-1]
+    elif text.endswith("%"):
+        text = text[:-1]
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if prefix == "-" and number > 0:
+        number = -number
+    return number, postfix
+
+
+def _effect_number(name: str, prop) -> float | None:
+    channel = _effect_channel(name)
+    parsed = _signed_number(prop)
+    if channel is None or parsed is None:
+        return None
+    number, postfix = parsed
+    if number == 0:
+        return None
+    percent = "percent" in _compact_name(name) or "%" in postfix or "%" in str(prop.get("value"))
+    if channel == "move_speed":
+        return number
+    if channel == "spirit" and not percent:
+        return number / 30.0
+    if channel == "health" and not percent:
+        return number / 100.0
+    if channel in {"heal", "lifesteal"} and not percent:
+        return None
+    return number / 100.0
+
+
+def item_effects(item) -> dict[str, float]:
+    props = item.get("properties") or {}
+    totals: dict[str, float] = {}
+    for name in _listed_property_names(item):
+        prop = props.get(name) if isinstance(props, dict) else None
+        number = _effect_number(name, prop)
+        channel = _effect_channel(name)
+        if number is None or channel is None:
+            continue
+        totals[channel] = totals.get(channel, 0.0) + number
+    return {key: round(value, 4) for key, value in totals.items() if round(value, 4)}
+
+
+def format_effects(effects: dict[str, float]) -> str:
+    parts = []
+    for name in _EFFECT_ORDER:
+        value = effects.get(name)
+        if not value:
+            continue
+        parts.append(f"{name}:{value:.4f}".rstrip("0").rstrip("."))
+    return ",".join(parts)
+
+
+def item_tag_sets(item) -> tuple[set[str], set[str]]:
+    tags: set[str] = set()
+    answers: set[str] = set()
+    props = item.get("properties") or {}
+    for name in _listed_property_names(item):
+        scale = None
+        if isinstance(props, dict):
+            prop = props.get(name)
+            if isinstance(prop, dict):
+                scale = prop.get("scale_function")
+        found, found_answers = property_marks(name, scale)
+        tags.update(found)
+        answers.update(found_answers)
+    return tags, answers
+
+
+def hero_threat_tags(heroes, items) -> dict[int, set[str]]:
+    by_class = {}
+    for item in items:
+        class_name = item.get("class_name")
+        if class_name and class_name not in by_class:
+            by_class[str(class_name)] = item
+    result: dict[int, set[str]] = {}
+    for hero in heroes:
+        tags: set[str] = set()
+        slots = hero.get("items") or {}
+        if not isinstance(slots, dict):
+            continue
+        for key in ("signature1", "signature2", "signature3", "signature4"):
+            ability = by_class.get(str(slots.get(key) or ""))
+            if not ability:
+                continue
+            props = ability.get("properties") or {}
+            if not isinstance(props, dict):
+                continue
+            for name, prop in props.items():
+                if not _property_is_live(prop):
+                    continue
+                scale = prop.get("scale_function") if isinstance(prop, dict) else None
+                found, _answers = property_marks(str(name), scale)
+                tags.update(tag for tag in found if tag in _HERO_THREATS)
+        result[int(hero["id"])] = tags
+    return result
+
+
 def signature_class_names(heroes) -> set[str]:
     names: set[str] = set()
     for hero in heroes:
@@ -253,7 +538,7 @@ def hero_rows(payload, allowed_ids) -> list[dict]:
 def item_rows(payload, allowed_ids, signature_names=None) -> list[dict]:
     allowed = {int(item_id) for item_id in allowed_ids}
     signatures = set(signature_names or [])
-    rows: dict[int, tuple[str, str, int | None, str | None, int | None, str]] = {}
+    rows: dict[int, tuple] = {}
     for item in payload:
         item_id = int(item["id"])
         if item_id not in allowed or item_id in rows:
@@ -267,6 +552,7 @@ def item_rows(payload, allowed_ids, signature_names=None) -> list[dict]:
             category = category_of(item.get("item_slot_type"))
         else:
             category = "other"
+        tags, answers = item_tag_sets(item)
         rows[item_id] = (
             _clean_name(item.get("name"), item_id),
             category,
@@ -274,10 +560,13 @@ def item_rows(payload, allowed_ids, signature_names=None) -> list[dict]:
             image_of(item),
             owner,
             format_stats(header_buckets(item)),
+            format_tags(tags),
+            format_answers(answers),
+            format_effects(item_effects(item)),
         )
     for item_id in allowed:
         if item_id not in rows:
-            rows[item_id] = (str(item_id), "other", None, None, None, "")
+            rows[item_id] = (str(item_id), "other", None, None, None, "", "", "", "")
     return [
         {
             "id": item_id,
@@ -287,6 +576,9 @@ def item_rows(payload, allowed_ids, signature_names=None) -> list[dict]:
             "image": image,
             "owner": owner,
             "stats": stats,
+            "tags": tags,
+            "answers": answers,
+            "effects": effects,
         }
-        for item_id, (name, category, cost, image, owner, stats) in sorted(rows.items())
+        for item_id, (name, category, cost, image, owner, stats, tags, answers, effects) in sorted(rows.items())
     ]
