@@ -8,6 +8,7 @@ from dynamor.services.recommender import (
     group_items,
     group_phases,
     investment_progress,
+    hero_chart_points,
     suggest,
     validate_draft,
 )
@@ -748,52 +749,50 @@ def test_bullet_resist_counters_weapon_and_lumped_defense_does_not():
     assert 40 not in {item.item_id for item in build.items}
 
 
-def test_chart_time_and_keep_share_ignore_threats():
-    count = 20
-    index = csr_matrix(
-        ([1] * count, (list(range(count)), [0] * count)),
-        shape=(count, 3),
-        dtype=np.float64,
-    )
-    targets = csr_matrix((count, 1), dtype=np.uint8)
-    item_times = csr_matrix((count, 1), dtype=np.uint32)
+def test_chart_win_rate_uses_the_latest_five_hundred_games():
     names = {
         10: ("Close Quarters", "weapon", 800, None),
+        20: ("Extra Spirit", "spirit", 1600, None),
         99: ("Rare", "spirit", 800, None),
     }
-    purchases = []
-    for row in range(count):
-        sold = 0 if row < 10 else 50
-        bought = [(10, 120, sold)]
-        if row == 0:
-            bought.append((99, 30, 0))
-        purchases.append(bought)
-    shared = dict(
-        hero_id=5,
-        index=index,
-        targets=targets,
-        hero_ids=np.array([5] * count),
-        hero_catalog=[1, 7, 60],
-        item_catalog=[10],
-        names=names,
-        item_times=item_times,
-        top_k=count,
-        top_items=15,
-        purchases=purchases,
+    games = []
+    for started in range(1, 601):
+        won = started % 2 == 0
+        if started > 100:
+            bought = [(20, 120, 0)]
+            if started == 600:
+                bought.append((99, 30, 0))
+        else:
+            bought = [(10, 30, 0)]
+        games.append((started, won, bought))
+
+    points, played = hero_chart_points(games, names)
+    wins_only, _played = hero_chart_points(
+        [(started, True, [(20, 120, 0)]) for started in range(500)],
+        names,
     )
-    plain = suggest(enemy_ids=[1], **shared)
-    marked = suggest(
-        enemy_ids=[1, 1],
-        hero_tags={1: ("heal",)},
-        item_answers={10: ("antiheal",)},
-        **shared,
+    marked, _played = hero_chart_points(
+        games,
+        names,
+        answers={20: ("antiheal",)},
+        threats={"heal": 1.0},
     )
 
-    point = plain.points[0]
-    assert point.item_id == 10
-    assert point.purchase_s == 120
-    assert point.keep_share == 0.5
-    assert 99 not in {row.item_id for row in plain.points}
-    assert marked.points[0].keep_share == point.keep_share
-    assert marked.points[0].purchase_s == point.purchase_s
-    assert marked.points[0].answers is True
+    assert played == 500
+    assert [point.item_id for point in points] == [20]
+    assert points[0].purchase_s == 120
+    assert points[0].win_rate == 0.5
+    assert wins_only[0].win_rate == 1.0
+    assert marked[0].win_rate == points[0].win_rate
+    assert marked[0].answers is True
+
+
+def test_chart_uses_every_game_when_the_hero_has_fewer_than_five_hundred():
+    names = {10: ("Close Quarters", "weapon", 800, None)}
+    games = [(index, index < 10, [(10, 120, 0)]) for index in range(20)]
+
+    points, played = hero_chart_points(games, names)
+
+    assert played == 20
+    assert points[0].purchase_s == 120
+    assert points[0].win_rate == 0.5

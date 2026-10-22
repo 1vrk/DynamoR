@@ -18,7 +18,7 @@ from dynamor.catalog.assets import (
     signature_class_names,
 )
 from dynamor.data.client import download_files, fetch_manifest, select_files
-from dynamor.data.extract import build_rows, scan_raw, write_interim
+from dynamor.data.extract import build_rows, chart_rows, scan_raw, write_interim
 from dynamor.data.filter import filter_matches
 from dynamor.features.catalog import hero_ids, item_ids, read_ids, write_ids
 from dynamor.features.drafts import draft_matrix
@@ -102,12 +102,27 @@ def refresh_is_due(finished_at: datetime | None, *, now: datetime) -> bool:
     return now - finished_at > DUE_AFTER
 
 
-def build_match_table(settings):
+def _filtered_matches(settings):
     paths = sorted(settings.raw_dir.glob("*.parquet"))
     if not paths:
         raise SystemExit(f"no parquet files in {settings.raw_dir}")
-    frame = build_rows(filter_matches(scan_raw(paths), settings), settings)
+    filtered = filter_matches(scan_raw(paths), settings)
+    if isinstance(filtered, pl.LazyFrame):
+        filtered = filtered.collect()
+    return filtered
+
+
+def build_hero_games(settings):
+    frame = chart_rows(_filtered_matches(settings), settings)
+    write_interim(frame, settings.hero_games_path)
+    return frame
+
+
+def build_match_table(settings):
+    filtered = _filtered_matches(settings)
+    frame = build_rows(filtered, settings)
     write_interim(frame, settings.interim_path)
+    write_interim(chart_rows(filtered, settings), settings.hero_games_path)
     return frame
 
 

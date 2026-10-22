@@ -42,7 +42,7 @@ class ChartPoint:
     category: str
     image: str | None
     purchase_s: int
-    keep_share: float
+    win_rate: float
     answers: bool = False
 
 
@@ -73,6 +73,7 @@ class Context:
     hero_tags: dict[int, tuple[str, ...]]
     item_answers: dict[int, tuple[str, ...]]
     item_effects: dict[int, dict[str, float]] | None
+    hero_games: pl.DataFrame
 
 
 def suggest(
@@ -145,8 +146,7 @@ def suggest(
     skills.sort(key=lambda row: (row.purchase_s is None, row.purchase_s or 0, row.item_id))
     labels = {} if hero_names is None else hero_names
     counters = _counter_picks(names, answers, effects, use_effects, threats, enemy_ids, hero_tags, shop, labels)
-    points = _chart_points(purchases, neighbor_rows, names, answers, effects, use_effects, threats)
-    return DraftBuild(shop, skills, tuple(counters), tuple(points))
+    return DraftBuild(shop, skills, tuple(counters))
 
 
 def _skill_recommendations(skill_ids, targets, neighbor_rows, item_catalog):
@@ -216,6 +216,7 @@ TAG_ALPHA = 0.2
 THREAT_MIN_ENEMIES = 2
 COUNTER_LIMIT = 4
 CHART_MIN_SHARE = 0.1
+CHART_GAMES = 500
 LINE_UNIT = 0.30
 CURVE_SOULS = (800, 1600, 2400, 3200, 4800, 6400, 8000, 11200, 16000, 22400, 28800)
 CURVE_BONUS = {
@@ -396,33 +397,34 @@ def _counter_picks(names, answers, effects, use_effects, threats, enemy_ids, her
     return picks
 
 
-def _chart_points(purchases, neighbor_rows, names, answers, effects, use_effects, threats) -> list[ChartPoint]:
-    neighbor_count = len(neighbor_rows)
-    if neighbor_count == 0:
-        return []
+def hero_chart_points(games, names, answers=None, effects=None, threats=None) -> tuple[list[ChartPoint], int]:
+    answers = {} if answers is None else answers
+    threats = {} if threats is None else threats
+    owned = {} if effects is None else effects
+    sample = sorted(games, key=lambda game: game[0], reverse=True)[:CHART_GAMES]
+    played = len(sample)
+    if played == 0:
+        return [], 0
     buyers: dict[int, list[int]] = {}
-    keepers: dict[int, int] = {}
-    for row in neighbor_rows:
-        if row >= len(purchases):
-            continue
+    wins: dict[int, int] = {}
+    for _started, won, purchases in sample:
         seen: set[int] = set()
-        for item_id, bought_at, sold_at in purchases[row]:
+        for item_id, bought_at, _sold_at in purchases:
             item_id = int(item_id)
             if item_id in seen:
                 continue
             seen.add(item_id)
             buyers.setdefault(item_id, []).append(int(bought_at))
-            if int(sold_at) == 0:
-                keepers[item_id] = keepers.get(item_id, 0) + 1
-    owned = effects if use_effects else None
+            if won:
+                wins[item_id] = wins.get(item_id, 0) + 1
     points = []
     for item_id, times in buyers.items():
-        if len(times) / neighbor_count < CHART_MIN_SHARE:
+        if len(times) / played < CHART_MIN_SHARE:
             continue
         name, category, _cost, image = names.get(item_id, (str(item_id), "other", None, None))
         if category not in INVEST_CATEGORIES:
             continue
-        item_effects = None if owned is None else owned.get(item_id, {})
+        item_effects = None if effects is None else owned.get(item_id, {})
         points.append(
             ChartPoint(
                 item_id=item_id,
@@ -430,12 +432,12 @@ def _chart_points(purchases, neighbor_rows, names, answers, effects, use_effects
                 category=category,
                 image=None if image is None else str(image),
                 purchase_s=int(np.median(times)),
-                keep_share=keepers.get(item_id, 0) / neighbor_count,
+                win_rate=wins.get(item_id, 0) / len(times),
                 answers=bool(_matched_threats(answers.get(item_id, ()), item_effects, threats)),
             )
         )
     points.sort(key=lambda point: (point.purchase_s, point.item_id))
-    return points
+    return points, played
 
 
 def _threat_bonus(answers, threats: dict[str, float], effects: dict[str, float] | None = None) -> float:
@@ -732,6 +734,35 @@ def validate_draft(hero_id: int, enemy_ids, known_ids) -> str | None:
     return None
 
 
+def _read_hero_games(path) -> pl.DataFrame:
+    if not path.exists():
+        return pl.DataFrame(
+            schema={
+                "match_id": pl.Int64,
+                "hero_id": pl.Int32,
+                "won": pl.Boolean,
+                "start_time": pl.Datetime(time_zone="UTC"),
+                "purchase_items": pl.List(pl.UInt32),
+                "purchase_times": pl.List(pl.UInt32),
+                "purchase_sold": pl.List(pl.UInt32),
+            }
+        )
+    return pl.read_parquet(path)
+
+
+def games_for_hero(frame: pl.DataFrame, hero_id: int) -> list:
+    if frame.height == 0:
+        return []
+    subset = frame.filter(pl.col("hero_id") == int(hero_id))
+    games = []
+    for row in subset.iter_rows(named=True):
+        items = row["purchase_items"] or []
+        times = row["purchase_times"] or []
+        sold = row["purchase_sold"] or []
+        games.append((row["start_time"], bool(row["won"]), list(zip(items, times, sold))))
+    return games
+
+
 def load_context(settings) -> Context:
     if not settings.index_path.exists():
         raise FileNotFoundError(settings.index_path)
@@ -760,6 +791,7 @@ def load_context(settings) -> Context:
         hero_tags=_tags_by_id(hero_frame, "tags"),
         item_answers=_tags_by_id(item_frame, "answers"),
         item_effects=_effects_by_item(item_frame),
+        hero_games=_read_hero_games(settings.hero_games_path),
         names={
             int(row["id"]): (
                 row["name"],

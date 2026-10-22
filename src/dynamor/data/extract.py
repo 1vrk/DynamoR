@@ -170,6 +170,63 @@ def build_rows(frame, settings) -> pl.DataFrame:
         )
     )
 
+def chart_rows(frame, settings) -> pl.DataFrame:
+    if isinstance(frame, pl.LazyFrame):
+        frame = frame.collect()
+    team_size = int(settings.players_per_team)
+    output = []
+    for key, match in frame.group_by("match_id"):
+        match_id = key[0]
+        teams = {
+            TEAM0: match.filter(pl.col("team") == TEAM0),
+            TEAM1: match.filter(pl.col("team") == TEAM1),
+        }
+        if teams[TEAM0].height != team_size or teams[TEAM1].height != team_size:
+            continue
+        for side in teams.values():
+            for record in side.iter_rows(named=True):
+                bought_ids, bought_times, sold_times = purchase_log(
+                    record["items.item_id"],
+                    record["items.sold_time_s"],
+                    record["items.game_time_s"],
+                )
+                output.append(
+                    {
+                        "match_id": int(match_id),
+                        "hero_id": int(record["hero_id"]),
+                        "won": bool(record["won"]),
+                        "start_time": record["start_time"],
+                        "purchase_items": bought_ids,
+                        "purchase_times": bought_times,
+                        "purchase_sold": sold_times,
+                    }
+                )
+    schema = {
+        "match_id": pl.Int64,
+        "hero_id": pl.Int32,
+        "won": pl.Boolean,
+        "start_time": pl.Datetime(time_zone="UTC"),
+        "purchase_items": pl.List(pl.UInt32),
+        "purchase_times": pl.List(pl.UInt32),
+        "purchase_sold": pl.List(pl.UInt32),
+    }
+    if not output:
+        return pl.DataFrame(schema=schema)
+    return (
+        pl.DataFrame(output)
+        .unique(subset=["match_id", "hero_id"], keep="first")
+        .select(list(schema))
+        .with_columns(
+            pl.col("match_id").cast(pl.Int64),
+            pl.col("hero_id").cast(pl.Int32),
+            pl.col("won").cast(pl.Boolean),
+            pl.col("purchase_items").cast(pl.List(pl.UInt32)),
+            pl.col("purchase_times").cast(pl.List(pl.UInt32)),
+            pl.col("purchase_sold").cast(pl.List(pl.UInt32)),
+        )
+    )
+
+
 def write_interim(frame: pl.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.write_parquet(path)

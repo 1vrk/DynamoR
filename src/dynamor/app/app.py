@@ -7,6 +7,9 @@ from dynamor.services.recommender import (
     INVEST_CATEGORIES,
     INVEST_TARGET,
     group_phases,
+    games_for_hero,
+    hero_chart_points,
+    _enemy_threats,
     investment_progress,
     load_context,
     suggest,
@@ -108,7 +111,7 @@ def _chart_html(points) -> str:
     marks = []
     for point in points:
         left = min(point.purchase_s, span) / span * 100
-        top = (1 - max(0.0, min(1.0, point.keep_share))) * 100
+        top = (1 - max(0.0, min(1.0, point.win_rate))) * 100
         border = BORDERS.get(point.category, BORDERS["other"])
         thickness = 3 if point.answers else 1
         picture = ""
@@ -119,7 +122,7 @@ def _chart_html(points) -> str:
             )
         title = (
             f"{point.name} {point.purchase_s // 60}:{point.purchase_s % 60:02d} "
-            f"{round(point.keep_share * 100)}%"
+            f"{round(point.win_rate * 100)}%"
         )
         marks.append(
             f'<div title="{html.escape(title)}" style="position:absolute;left:{left:.2f}%;'
@@ -247,7 +250,14 @@ def _render_build() -> None:
         context.item_effects,
         labels,
     )
-    if not build.items and not build.skills and not build.counters and not build.points:
+    chart, played = hero_chart_points(
+        games_for_hero(context.hero_games, own_id),
+        context.names,
+        context.item_answers,
+        context.item_effects,
+        _enemy_threats(enemy_ids, context.hero_tags),
+    )
+    if not build.items and not build.skills and not build.counters and not chart:
         st.info("No winning drafts for this hero")
         return
 
@@ -286,10 +296,11 @@ def _render_build() -> None:
         st.markdown(_counter_html(build.counters), unsafe_allow_html=True)
 
     st.subheader("Chart")
-    if not build.points:
+    st.caption(f"{played} games")
+    if not chart:
         st.caption("No items")
     else:
-        st.markdown(_chart_html(build.points), unsafe_allow_html=True)
+        st.markdown(_chart_html(chart), unsafe_allow_html=True)
 
 
 st.set_page_config(page_title="DynamoR", layout="wide")

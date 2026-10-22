@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import polars as pl
 
-from dynamor.data.extract import build_rows, purchase_log, upgrade_pairs
+from dynamor.data.extract import build_rows, chart_rows, purchase_log, upgrade_pairs
 from dynamor.data.schema import TEAM0, TEAM1
 
 WHEN = datetime(2026, 10, 19, 17, 0, tzinfo=timezone.utc)
@@ -84,3 +84,22 @@ def test_build_rows_keeps_full_winning_team_only():
         assert len(record["enemy_heroes"]) == 6
         assert record["hero_id_target"] not in record["ally_heroes"]
         assert record["hero_id_target"] not in record["enemy_heroes"]
+
+
+def test_chart_rows_keep_wins_and_losses_from_a_full_match():
+    rows = []
+    for hero_id in range(1, 7):
+        rows.append(player(100, hero_id, TEAM0, True, [10], [0], [120]))
+    for hero_id in range(7, 13):
+        rows.append(player(100, hero_id, TEAM1, False, [20], [5], [80]))
+    for hero_id in range(101, 106):
+        rows.append(player(200, hero_id, TEAM0, True, [1], [0]))
+
+    result = chart_rows(pl.DataFrame(rows), SimpleNamespace(players_per_team=6))
+
+    assert result.height == 12
+    assert result.filter(pl.col("won")).height == 6
+    assert result.filter(~pl.col("won")).height == 6
+    loss = result.filter(pl.col("hero_id") == 7)
+    assert loss.get_column("purchase_items").to_list() == [[20]]
+    assert loss.get_column("purchase_times").to_list() == [[80]]

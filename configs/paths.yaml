@@ -6,6 +6,7 @@ interim_path: data/interim/matches.parquet
 hero_catalog_path: data/reference/hero_ids.parquet
 item_catalog_path: data/reference/item_ids.parquet
 rows_path: data/processed/rows.parquet
+hero_games_path: data/processed/hero_games.parquet
 drafts_path: data/processed/drafts.npz
 targets_path: data/processed/targets.npz
 item_times_path: data/processed/item_times.npz
